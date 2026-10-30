@@ -34,14 +34,17 @@ from custom_components.pseg.pseg_client import PsegAuthError
 class MockResponse:
     """Mock aiohttp ClientResponse async context manager."""
 
-    def __init__(self, status=200, json_data=None):
+    def __init__(self, status=200, json_data=None, delay=0):
         self.status = status
         self._json_data = json_data or {}
+        self.delay = delay
 
     async def json(self):
         return self._json_data
 
     async def __aenter__(self):
+        if self.delay:
+            await asyncio.sleep(self.delay)
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -204,14 +207,17 @@ class TestDateValidation(unittest.TestCase):
         try:
             fake_hass = MagicMock()
             fake_coord = MagicMock()
-            fake_coord.async_backfill_history = AsyncMock()
+            fake_coord.async_backfill_history = AsyncMock(return_value=1)
             fake_hass.data = {DOMAIN: {"test_entry": fake_coord}}
 
             # Service call with whitespace-padded dates
             call_valid = MagicMock()
             call_valid.data = {"start_date": "  2026-10-01  ", "end_date": " 2026-10-02 "}
             loop.run_until_complete(_async_handle_backfill_service(fake_hass, call_valid))
-            fake_coord.async_backfill_history.assert_called_once_with("2026-10-01", "2026-10-02")
+            fake_coord.async_backfill_history.assert_called_once_with(
+                start_date="2026-10-01",
+                end_date="2026-10-02",
+            )
 
             # Service call with invalid date raises HomeAssistantError
             call_invalid = MagicMock()
@@ -227,6 +233,10 @@ class TestCoordinatorReauthSafeguards(unittest.TestCase):
 
     def setUp(self):
         self.hass = MagicMock()
+        async def fake_executor(func, *args):
+            return func(*args)
+        self.hass.async_add_executor_job = fake_executor
+
         self.client = MagicMock()
         self.entry_data = {
             "username": "test@example.com",
@@ -234,6 +244,7 @@ class TestCoordinatorReauthSafeguards(unittest.TestCase):
             "auth_server_url": "http://127.0.0.1:8000",
         }
         self.coord = PsegDataUpdateCoordinator(self.hass, self.client, self.entry_data)
+        self.coord.async_record_statistics = AsyncMock()
         self.coord.auth_required = True
         self.session = MagicMock()
         sys.modules["homeassistant.helpers.aiohttp_client"].async_get_clientsession.return_value = self.session
@@ -377,13 +388,12 @@ class TestCoordinatorReauthSafeguards(unittest.TestCase):
             self.coord.auth_required = True
             post_call_count = 0
 
-            async def delayed_post(*args, **kwargs):
+            def side_effect_post(*args, **kwargs):
                 nonlocal post_call_count
                 post_call_count += 1
-                await asyncio.sleep(0.02)
-                return MockResponse(200, {"success": True, "cookies": "MM_SID=fresh"})
+                return MockResponse(200, {"success": True, "cookies": "MM_SID=fresh"}, delay=0.03)
 
-            self.session.post = MagicMock(side_effect=delayed_post)
+            self.session.post = MagicMock(side_effect=side_effect_post)
 
             async def run_gather():
                 return await asyncio.gather(
@@ -405,17 +415,17 @@ class TestCoordinatorReauthSafeguards(unittest.TestCase):
             self.coord.auth_required = True
             attempt_completion_time = None
 
-            async def slow_login(*args, **kwargs):
+            def on_post_call(*args, **kwargs):
                 nonlocal attempt_completion_time
-                await asyncio.sleep(0.02)
                 attempt_completion_time = datetime.now(timezone.utc)
-                return MockResponse(401, {"error": "Invalid password"})
+                return MockResponse(401, {"error": "Invalid password"}, delay=0.03)
 
-            self.session.post = MagicMock(side_effect=slow_login)
+            self.session.post = MagicMock(side_effect=on_post_call)
 
             result = loop.run_until_complete(self.coord.async_reauthenticate())
             self.assertFalse(result)
             self.assertIsNotNone(self.coord._last_reauth_attempt)
+            self.assertIsNotNone(attempt_completion_time)
             self.assertGreaterEqual(self.coord._last_reauth_attempt, attempt_completion_time)
 
             # An immediate subsequent attempt must hit cooldown without calling post again
@@ -478,10 +488,6 @@ class TestCoordinatorReauthSafeguards(unittest.TestCase):
             self.coord.auth_required = False
             self.coord.status = "connected"
 
-            async def fake_executor(func, *args):
-                return func(*args)
-
-            self.hass.async_add_executor_job = fake_executor
             self.session.post = MagicMock(
                 return_value=MockResponse(200, {"success": True, "cookies": "MM_SID=fresh"})
             )
