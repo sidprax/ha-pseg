@@ -103,6 +103,7 @@
       "invalid_auth": "Authentication failed. Please verify your username and password.",
       "recaptcha_blocked": "Google reCAPTCHA has throttled automated audio challenge solving. Please choose 'Browser Session Cookie' from the re-authentication menu, or try again later.",
       "auth_server_error": "The automated login helper encountered an error on port 8000. Please try again or use the session cookie option.",
+      "auth_server_redirect": "The companion auth URL returned an HTTP redirect, which is disallowed for security. Please configure the direct companion endpoint without redirects.",
       "invalid_cookie": "The session cookie provided was rejected or has expired.",
       "auth_server_unavailable": "The PSE&G Auth Companion Add-on is not running (port 8000 unreachable). Please install and start the companion add-on under Settings > Add-ons to use automated OTP login, or choose 'Browser Session Cookie' from the menu.",
       "invalid_code": "The verification code entered is invalid or expired.",

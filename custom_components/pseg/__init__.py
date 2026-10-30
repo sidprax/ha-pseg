@@ -62,13 +62,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def _async_handle_backfill_service(hass: HomeAssistant, call: ServiceCall) -> None:
     """Handle backfill history service call with validated date inputs."""
-    start_date = call.data.get("start_date")
-    end_date = call.data.get("end_date")
+    raw_start = call.data.get("start_date")
+    raw_end = call.data.get("end_date")
 
-    if start_date and not is_valid_date_str(str(start_date)):
-        raise HomeAssistantError(f"Invalid start_date '{start_date}'; expected YYYY-MM-DD")
-    if end_date and not is_valid_date_str(str(end_date)):
-        raise HomeAssistantError(f"Invalid end_date '{end_date}'; expected YYYY-MM-DD")
+    start_date = str(raw_start).strip() if raw_start is not None else None
+    end_date = str(raw_end).strip() if raw_end is not None else None
+
+    if start_date and not is_valid_date_str(start_date):
+        raise HomeAssistantError(f"Invalid start_date '{raw_start}'; expected YYYY-MM-DD")
+    if end_date and not is_valid_date_str(end_date):
+        raise HomeAssistantError(f"Invalid end_date '{raw_end}'; expected YYYY-MM-DD")
 
     coordinators = list(hass.data.get(DOMAIN, {}).values())
     if not coordinators:

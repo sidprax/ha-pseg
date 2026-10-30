@@ -34,7 +34,7 @@ from .const import (
     MFA_METHOD_SMS,
 )
 from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
-from .util import is_valid_auth_server_url, sanitize_url_for_logging
+from .util import get_valid_auth_server_url, is_valid_auth_server_url, sanitize_url_for_logging
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,11 +52,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def _async_detect_auth_server(self) -> Optional[str]:
         """Probe candidate URLs to detect if the companion auth add-on is running."""
         cached = self.context.get("auth_url")
-        if self._reauth_entry:
-            cached = (
-                cached
-                or self._reauth_entry.options.get(CONF_AUTH_SERVER_URL)
-                or self._reauth_entry.data.get(CONF_AUTH_SERVER_URL)
+        if not cached and self._reauth_entry:
+            cached = get_valid_auth_server_url(
+                self._reauth_entry.options,
+                self._reauth_entry.data,
+                None,
             )
 
         candidate_urls = []
@@ -187,18 +187,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             username = user_input.get(CONF_USERNAME, default_username).strip()
             password = user_input.get(CONF_PASSWORD, "").strip()
             mfa_method = user_input.get(CONF_MFA_METHOD, default_mfa)
-            auth_url = (
-                existing_options.get(CONF_AUTH_SERVER_URL)
-                or existing_data.get(CONF_AUTH_SERVER_URL)
-                or DEFAULT_AUTH_SERVER_URL
+            auth_url = get_valid_auth_server_url(
+                existing_options,
+                existing_data,
+                DEFAULT_AUTH_SERVER_URL,
             )
-            if not is_valid_auth_server_url(auth_url):
-                _LOGGER.warning(
-                    "Configured companion auth_url '%s' is invalid or untrusted; falling back to default %s",
-                    sanitize_url_for_logging(auth_url),
-                    DEFAULT_AUTH_SERVER_URL,
-                )
-                auth_url = DEFAULT_AUTH_SERVER_URL
 
             if not username or not password:
                 errors["base"] = "missing_credentials"
@@ -243,6 +236,14 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     _LOGGER.error("Auth helper failed: %s", res_json.get("error", "authentication failed"))
                                     errors["base"] = "invalid_auth"
                                     break
+                            elif 300 <= resp.status < 400:
+                                _LOGGER.warning(
+                                    "Auth helper at %s returned redirect HTTP %s; companion endpoint must not redirect",
+                                    sanitize_url_for_logging(target_url),
+                                    resp.status,
+                                )
+                                errors["base"] = "auth_server_redirect"
+                                break
                             else:
                                 try:
                                     res_json = await resp.json()
@@ -257,10 +258,10 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     errors["base"] = "invalid_auth"
                                 break
                     except aiohttp.ClientConnectorError:
-                        _LOGGER.debug("Could not reach auth server at %s", target_url)
+                        _LOGGER.debug("Could not reach auth server at %s", sanitize_url_for_logging(target_url))
                         continue
                     except Exception as err:
-                        _LOGGER.exception("Reauth attempt to %s failed: %s", target_url, err)
+                        _LOGGER.exception("Reauth attempt to %s failed: %s", sanitize_url_for_logging(target_url), err)
                         errors["base"] = "unknown"
                         break
 
@@ -353,6 +354,14 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 else:
                                     errors["base"] = "invalid_auth"
                                     break
+                            elif 300 <= resp.status < 400:
+                                _LOGGER.warning(
+                                    "Auth helper at %s returned redirect HTTP %s; companion endpoint must not redirect",
+                                    sanitize_url_for_logging(target_url),
+                                    resp.status,
+                                )
+                                errors["base"] = "auth_server_redirect"
+                                break
                             else:
                                 try:
                                     res_json = await resp.json()
@@ -366,9 +375,10 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     errors["base"] = "invalid_auth"
                                 break
                     except aiohttp.ClientConnectorError:
+                        _LOGGER.debug("Could not reach auth server at %s", sanitize_url_for_logging(target_url))
                         continue
                     except Exception as err:
-                        _LOGGER.exception("MyMeter login error: %s", err)
+                        _LOGGER.exception("MyMeter login error via %s: %s", sanitize_url_for_logging(target_url), err)
                         errors["base"] = "unknown"
                         break
 
@@ -473,6 +483,14 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     _LOGGER.error("Auth helper failed: %s", res_json.get("error", "invalid authentication"))
                                     errors["base"] = "invalid_auth"
                                     break
+                            elif 300 <= resp.status < 400:
+                                _LOGGER.warning(
+                                    "Auth helper at %s returned redirect HTTP %s; companion endpoint must not redirect",
+                                    sanitize_url_for_logging(target_url),
+                                    resp.status,
+                                )
+                                errors["base"] = "auth_server_redirect"
+                                break
                             else:
                                 try:
                                     res_json = await resp.json()
@@ -488,10 +506,10 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     errors["base"] = "invalid_auth"
                                 break
                     except aiohttp.ClientConnectorError:
-                        _LOGGER.debug("Could not reach auth server at %s", target_url)
+                        _LOGGER.debug("Could not reach auth server at %s", sanitize_url_for_logging(target_url))
                         continue
                     except Exception as err:
-                        _LOGGER.exception("Error calling auth server at %s: %s", target_url, err)
+                        _LOGGER.exception("Error calling auth server at %s: %s", sanitize_url_for_logging(target_url), err)
                         errors["base"] = "unknown"
                         break
 
@@ -593,6 +611,13 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             if getattr(self, "_reauth_entry", None):
                                 return await self.async_step_reauth_confirm()
                             return await self.async_step_user()
+                        elif 300 <= resp.status < 400:
+                            _LOGGER.warning(
+                                "MFA endpoint %s returned redirect HTTP %s; companion endpoint must not redirect",
+                                sanitize_url_for_logging(auth_url),
+                                resp.status,
+                            )
+                            errors["base"] = "auth_server_redirect"
                         else:
                             errors["base"] = "invalid_code"
                 except Exception as err:

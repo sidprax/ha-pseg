@@ -64,19 +64,33 @@ else:
     aio.ClientError = FakeClientError
     aio.ClientConnectorError = FakeClientConnectorError
 
+class FakeHomeAssistantError(Exception):
+    """Mock HomeAssistantError deriving from Exception."""
+
+class FakeConfigEntryAuthFailed(FakeHomeAssistantError):
+    """Mock ConfigEntryAuthFailed deriving from HomeAssistantError."""
+
+class FakeUpdateFailed(FakeHomeAssistantError):
+    """Mock UpdateFailed deriving from HomeAssistantError."""
+
 # Wire package hierarchy so submodule imports resolve to their configured stubs
 sys.modules["homeassistant"].util = sys.modules["homeassistant.util"]
 sys.modules["homeassistant.util"].dt = sys.modules["homeassistant.util.dt"]
 sys.modules["homeassistant"].helpers = sys.modules["homeassistant.helpers"]
-sys.modules["homeassistant.helpers"].aiohttp_client = sys.modules["homeassistant.helpers.aiohttp_client"]
-sys.modules["homeassistant.helpers"].update_coordinator = sys.modules["homeassistant.helpers.update_coordinator"]
+sys.modules["homeassistant"].helpers.aiohttp_client = sys.modules["homeassistant.helpers.aiohttp_client"]
+sys.modules["homeassistant"].helpers.update_coordinator = sys.modules["homeassistant.helpers.update_coordinator"]
 sys.modules["homeassistant"].components = sys.modules["homeassistant.components"]
 sys.modules["homeassistant.components"].persistent_notification = sys.modules["homeassistant.components.persistent_notification"]
+sys.modules["homeassistant"].exceptions = sys.modules["homeassistant.exceptions"]
 
 # Configure specific stubs
+exc_mod = sys.modules["homeassistant.exceptions"]
+exc_mod.HomeAssistantError = FakeHomeAssistantError
+exc_mod.ConfigEntryAuthFailed = FakeConfigEntryAuthFailed
+
 coord_mod = sys.modules["homeassistant.helpers.update_coordinator"]
 coord_mod.DataUpdateCoordinator = FakeDataUpdateCoordinator
-coord_mod.UpdateFailed = Exception
+coord_mod.UpdateFailed = FakeUpdateFailed
 
 dt_mod = sys.modules["homeassistant.util.dt"]
 dt_mod.utcnow.side_effect = lambda: datetime.now(timezone.utc)
