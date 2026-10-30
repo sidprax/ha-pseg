@@ -8,52 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 # Ensure repo root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-# Provide a proper base class for DataUpdateCoordinator so subclasses initialize real instances
-class FakeDataUpdateCoordinator:
-    def __init__(self, hass, logger, *, name=None, update_interval=None, **kwargs):
-        self.hass = hass
-        self.logger = logger
-        self.name = name
-        self.update_interval = update_interval
-        self.data = None
-
-    def __class_getitem__(cls, item):
-        return cls
-
-
-# Stub Home Assistant modules if not present in test environment
-for mod in [
-    "homeassistant",
-    "homeassistant.components",
-    "homeassistant.components.frontend",
-    "homeassistant.components.persistent_notification",
-    "homeassistant.components.recorder",
-    "homeassistant.components.recorder.statistics",
-    "homeassistant.components.recorder.models",
-    "homeassistant.config_entries",
-    "homeassistant.const",
-    "homeassistant.core",
-    "homeassistant.exceptions",
-    "homeassistant.helpers",
-    "homeassistant.helpers.aiohttp_client",
-    "homeassistant.helpers.config_validation",
-    "homeassistant.helpers.issue_registry",
-    "homeassistant.helpers.typing",
-    "homeassistant.helpers.update_coordinator",
-    "homeassistant.util",
-    "homeassistant.util.dt",
-]:
-    if mod not in sys.modules:
-        m = MagicMock()
-        m.__path__ = []
-        sys.modules[mod] = m
-
-if "aiohttp" not in sys.modules:
-    sys.modules["aiohttp"] = MagicMock()
-
-# Inject FakeDataUpdateCoordinator onto the stubbed update_coordinator module
-sys.modules["homeassistant.helpers.update_coordinator"].DataUpdateCoordinator = FakeDataUpdateCoordinator
+import tests.conftest  # noqa: F401
 
 from custom_components.pseg.util import is_valid_auth_server_url, is_valid_date_str
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
