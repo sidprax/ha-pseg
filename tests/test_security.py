@@ -9,6 +9,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # Ensure repo root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Provide a proper base class for DataUpdateCoordinator so subclasses initialize real instances
+class FakeDataUpdateCoordinator:
+    def __init__(self, hass, logger, *, name=None, update_interval=None, **kwargs):
+        self.hass = hass
+        self.logger = logger
+        self.name = name
+        self.update_interval = update_interval
+        self.data = None
+
+    def __class_getitem__(cls, item):
+        return cls
+
+
 # Stub Home Assistant modules if not present in test environment
 for mod in [
     "homeassistant",
@@ -39,7 +52,11 @@ for mod in [
 if "aiohttp" not in sys.modules:
     sys.modules["aiohttp"] = MagicMock()
 
+# Inject FakeDataUpdateCoordinator onto the stubbed update_coordinator module
+sys.modules["homeassistant.helpers.update_coordinator"].DataUpdateCoordinator = FakeDataUpdateCoordinator
+
 from custom_components.pseg.util import is_valid_auth_server_url, is_valid_date_str
+from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
 
 
 class TestAuthServerUrlValidation(unittest.TestCase):
@@ -104,22 +121,17 @@ class TestDateValidation(unittest.TestCase):
 class TestCoordinatorReauthSafeguards(unittest.TestCase):
     """Test coordinator re-authentication cooldown and lockout prevention."""
 
-    def setUp(self):
-        from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
-        self.coordinator_cls = PsegDataUpdateCoordinator
-
     def test_cooldown_and_max_failure_limits(self):
         hass = MagicMock()
         client = MagicMock()
         entry_data = {"username": "test@example.com", "password": "password123"}
-        coord = self.coordinator_cls(hass, client, entry_data)
+        coord = PsegDataUpdateCoordinator(hass, client, entry_data)
 
         self.assertEqual(coord._reauth_failure_count, 0)
         self.assertIsNone(coord._last_reauth_attempt)
 
-        # Failure count accumulation
+        # Failure count accumulation: when failure count reaches 3, automated re-auth must be blocked
         coord._reauth_failure_count = 3
-        # When failure count reaches 3, automated re-auth must be blocked
         import asyncio
         loop = asyncio.new_event_loop()
         try:
