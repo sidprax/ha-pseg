@@ -34,7 +34,7 @@ from .const import (
     MFA_METHOD_SMS,
 )
 from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
-from .util import is_valid_auth_server_url
+from .util import is_valid_auth_server_url, sanitize_url_for_logging
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,7 +53,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Probe candidate URLs to detect if the companion auth add-on is running."""
         cached = self.context.get("auth_url")
         if self._reauth_entry:
-            cached = cached or self._reauth_entry.data.get(CONF_AUTH_SERVER_URL)
+            cached = (
+                cached
+                or self._reauth_entry.options.get(CONF_AUTH_SERVER_URL)
+                or self._reauth_entry.data.get(CONF_AUTH_SERVER_URL)
+            )
 
         candidate_urls = []
         if cached:
@@ -175,6 +179,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Confirm reauth credentials and trigger sign-in."""
         errors: Dict[str, str] = {}
         existing_data = self._reauth_entry.data if self._reauth_entry else {}
+        existing_options = self._reauth_entry.options if self._reauth_entry else {}
         default_username = existing_data.get(CONF_USERNAME, "")
         default_mfa = existing_data.get(CONF_MFA_METHOD, DEFAULT_MFA_METHOD)
 
@@ -182,7 +187,18 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             username = user_input.get(CONF_USERNAME, default_username).strip()
             password = user_input.get(CONF_PASSWORD, "").strip()
             mfa_method = user_input.get(CONF_MFA_METHOD, default_mfa)
-            auth_url = existing_data.get(CONF_AUTH_SERVER_URL, DEFAULT_AUTH_SERVER_URL)
+            auth_url = (
+                existing_options.get(CONF_AUTH_SERVER_URL)
+                or existing_data.get(CONF_AUTH_SERVER_URL)
+                or DEFAULT_AUTH_SERVER_URL
+            )
+            if not is_valid_auth_server_url(auth_url):
+                _LOGGER.warning(
+                    "Configured companion auth_url '%s' is invalid or untrusted; falling back to default %s",
+                    sanitize_url_for_logging(auth_url),
+                    DEFAULT_AUTH_SERVER_URL,
+                )
+                auth_url = DEFAULT_AUTH_SERVER_URL
 
             if not username or not password:
                 errors["base"] = "missing_credentials"
@@ -197,6 +213,8 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 session = async_get_clientsession(self.hass)
                 auth_result = None
                 for target_url in candidate_urls:
+                    if not is_valid_auth_server_url(target_url):
+                        continue
                     try:
                         async with session.post(
                             f"{target_url}/login",
@@ -206,6 +224,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 "mfa_method": mfa_method,
                                 "dispatch_mfa": True,
                             },
+                            allow_redirects=False,
                             timeout=aiohttp.ClientTimeout(total=90),
                         ) as resp:
                             connected = True
@@ -286,7 +305,9 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Automated direct sign-in via MyMeter invited account (zero 2FA)."""
         errors: Dict[str, str] = {}
-        auth_url = DEFAULT_AUTH_SERVER_URL
+        auth_url = self.context.get("auth_url") or DEFAULT_AUTH_SERVER_URL
+        if not is_valid_auth_server_url(auth_url):
+            auth_url = DEFAULT_AUTH_SERVER_URL
 
         if user_input is not None:
             username = user_input.get(CONF_USERNAME, "").strip()
@@ -305,6 +326,8 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 session = async_get_clientsession(self.hass)
                 cookies = None
                 for target_url in candidate_urls:
+                    if not is_valid_auth_server_url(target_url):
+                        continue
                     try:
                         async with session.post(
                             f"{target_url}/login",
@@ -314,6 +337,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 "auth_type": AUTH_TYPE_MYMETER,
                                 "dispatch_mfa": False,
                             },
+                            allow_redirects=False,
                             timeout=aiohttp.ClientTimeout(total=90),
                         ) as resp:
                             connected = True
@@ -395,12 +419,14 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Step 2a: Automated sign-in via primary PSE&G Okta SSO."""
         errors: Dict[str, str] = {}
+        auth_url = self.context.get("auth_url") or DEFAULT_AUTH_SERVER_URL
+        if not is_valid_auth_server_url(auth_url):
+            auth_url = DEFAULT_AUTH_SERVER_URL
 
         if user_input is not None:
             username = user_input.get(CONF_USERNAME, "").strip()
             password = user_input.get(CONF_PASSWORD, "").strip()
             mfa_method = user_input.get(CONF_MFA_METHOD, DEFAULT_MFA_METHOD)
-            auth_url = DEFAULT_AUTH_SERVER_URL
 
             if not username or not password:
                 errors["base"] = "missing_credentials"
@@ -415,6 +441,8 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 session = async_get_clientsession(self.hass)
                 auth_result = None
                 for target_url in candidate_urls:
+                    if not is_valid_auth_server_url(target_url):
+                        continue
                     try:
                         async with session.post(
                             f"{target_url}/login",
@@ -425,6 +453,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 "mfa_method": mfa_method,
                                 "dispatch_mfa": True,
                             },
+                            allow_redirects=False,
                             timeout=aiohttp.ClientTimeout(total=90),
                         ) as resp:
                             connected = True
@@ -527,6 +556,8 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 3: Verification of 6-digit OTP code."""
         errors: Dict[str, str] = {}
         auth_url = self.context.get("auth_url", DEFAULT_AUTH_SERVER_URL)
+        if not is_valid_auth_server_url(auth_url):
+            auth_url = DEFAULT_AUTH_SERVER_URL
         username = self.context.get("username", "")
         password = self.context.get("password", "")
 
@@ -547,6 +578,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     async with session.post(
                         f"{auth_url}/login/mfa",
                         json={"code": code},
+                        allow_redirects=False,
                         timeout=aiohttp.ClientTimeout(total=60),
                     ) as resp:
                         if resp.status == 200:

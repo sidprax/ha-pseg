@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 import logging
 from typing import Any, Dict, Optional
@@ -39,7 +40,7 @@ from .const import (
     DOMAIN,
 )
 from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
-from .util import is_valid_auth_server_url
+from .util import is_valid_auth_server_url, sanitize_url_for_logging
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self.last_successful_update: Optional[str] = None
         self._last_reauth_attempt: Optional[datetime] = None
         self._reauth_failure_count: int = 0
+        self._reauth_lock = asyncio.Lock()
 
         # Resolve optional user-configured rate override (None enables auto-derived 7-day average)
         user_rate = None
@@ -154,86 +156,118 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
     async def async_reauthenticate(self) -> bool:
         """Attempt silent re-authentication with credentials via companion add-on."""
+        self._addon_connected = False
         username = self.entry_data.get(CONF_USERNAME)
         password = self.entry_data.get(CONF_PASSWORD)
         if not username or not password:
             return False
 
-        # Guard against rapid retry hammering and utility account lockout
-        now = dt_util.utcnow()
-        if self._last_reauth_attempt and (now - self._last_reauth_attempt).total_seconds() < 60:
-            _LOGGER.warning("PSE&G re-authentication cooldown active; skipping automated attempt")
-            return False
+        async with self._reauth_lock:
+            # If an in-flight re-auth completed while waiting for the lock, do not repeat
+            if not self.auth_required:
+                return True
 
-        if self._reauth_failure_count >= 3:
-            _LOGGER.warning("Maximum automated re-authentication attempts reached (3); manual reconfiguration required")
-            return False
+            # Guard against rapid retry hammering and utility account lockout
+            now = dt_util.utcnow()
+            if self._last_reauth_attempt and (now - self._last_reauth_attempt).total_seconds() < 60:
+                _LOGGER.warning("PSE&G re-authentication cooldown active; skipping automated attempt")
+                return False
 
-        self._last_reauth_attempt = now
+            if self._reauth_failure_count >= 3:
+                _LOGGER.warning("Maximum automated re-authentication attempts reached (3); manual reconfiguration required")
+                return False
 
-        configured_url = (
-            (self.config_entry.options.get(CONF_AUTH_SERVER_URL) if self.config_entry else None)
-            or self.entry_data.get(CONF_AUTH_SERVER_URL)
-            or DEFAULT_AUTH_SERVER_URL
-        )
+            self._last_reauth_attempt = now
 
-        if not is_valid_auth_server_url(configured_url):
-            _LOGGER.warning(
-                "Configured auth_server_url '%s' is untrusted or invalid; falling back to default %s",
-                configured_url,
-                DEFAULT_AUTH_SERVER_URL,
+            configured_url = (
+                (self.config_entry.options.get(CONF_AUTH_SERVER_URL) if self.config_entry else None)
+                or self.entry_data.get(CONF_AUTH_SERVER_URL)
+                or DEFAULT_AUTH_SERVER_URL
             )
-            configured_url = DEFAULT_AUTH_SERVER_URL
 
-        # Only probe user-configured companion URL (and local loopback alias if local)
-        candidate_urls = [configured_url]
-        if "127.0.0.1" in configured_url and "http://localhost:8000" not in candidate_urls:
-            candidate_urls.append("http://localhost:8000")
-        elif "localhost" in configured_url and "http://127.0.0.1:8000" not in candidate_urls:
-            candidate_urls.append("http://127.0.0.1:8000")
+            if not is_valid_auth_server_url(configured_url):
+                _LOGGER.warning(
+                    "Configured auth_server_url '%s' is untrusted or invalid; falling back to default %s",
+                    sanitize_url_for_logging(configured_url),
+                    DEFAULT_AUTH_SERVER_URL,
+                )
+                configured_url = DEFAULT_AUTH_SERVER_URL
 
-        self._addon_connected = False
-        session = async_get_clientsession(self.hass)
-        auth_type = self.entry_data.get(CONF_AUTH_TYPE, AUTH_TYPE_MYMETER)
+            # Only probe user-configured companion URL (and local loopback alias if local)
+            candidate_urls = [configured_url]
+            if "127.0.0.1" in configured_url and "http://localhost:8000" not in candidate_urls:
+                candidate_urls.append("http://localhost:8000")
+            elif "localhost" in configured_url and "http://127.0.0.1:8000" not in candidate_urls:
+                candidate_urls.append("http://127.0.0.1:8000")
 
-        for auth_url in candidate_urls:
-            try:
-                async with session.post(
-                    f"{auth_url}/login",
-                    json={
-                        "username": username,
-                        "password": password,
-                        "auth_type": auth_type,
-                        "dispatch_mfa": False,
-                    },
-                    timeout=aiohttp.ClientTimeout(total=90),
-                ) as resp:
-                    self._addon_connected = True
-                    if resp.status == 200:
-                        res_json = await resp.json()
-                        if res_json.get("success") and res_json.get("cookies"):
-                            new_cookies = res_json["cookies"]
-                            self.client.update_cookie(new_cookies)
-                            self.entry_data[CONF_COOKIE] = new_cookies
-                            if self.config_entry:
-                                self.hass.config_entries.async_update_entry(
-                                    self.config_entry,
-                                    data={**self.config_entry.data, CONF_COOKIE: new_cookies},
+            session = async_get_clientsession(self.hass)
+            auth_type = self.entry_data.get(CONF_AUTH_TYPE, AUTH_TYPE_MYMETER)
+
+            for auth_url in candidate_urls:
+                if not is_valid_auth_server_url(auth_url):
+                    continue
+                try:
+                    async with session.post(
+                        f"{auth_url}/login",
+                        json={
+                            "username": username,
+                            "password": password,
+                            "auth_type": auth_type,
+                            "dispatch_mfa": False,
+                        },
+                        allow_redirects=False,
+                        timeout=aiohttp.ClientTimeout(total=90),
+                    ) as resp:
+                        self._addon_connected = True
+                        if resp.status == 200:
+                            res_json = await resp.json()
+                            if res_json.get("success") and res_json.get("cookies"):
+                                new_cookies = res_json["cookies"]
+                                self.client.update_cookie(new_cookies)
+                                self.entry_data[CONF_COOKIE] = new_cookies
+                                if self.config_entry:
+                                    self.hass.config_entries.async_update_entry(
+                                        self.config_entry,
+                                        data={**self.config_entry.data, CONF_COOKIE: new_cookies},
+                                    )
+                                _LOGGER.info(
+                                    "Silent re-authentication successful via %s",
+                                    sanitize_url_for_logging(auth_url),
                                 )
-                            _LOGGER.info("Silent re-authentication successful via %s", auth_url)
-                            self.auth_required = False
-                            self.status = "connected"
-                            self._reauth_failure_count = 0
-                            self._dismiss_auth_issues()
-                            return True
-                        elif res_json.get("mfa_required"):
-                            _LOGGER.warning("Silent refresh requires two-factor OTP verification")
-                            break
-            except Exception as refresh_err:
-                _LOGGER.warning("Silent refresh via %s failed: %s", auth_url, refresh_err)
+                                self.auth_required = False
+                                self.status = "connected"
+                                self._reauth_failure_count = 0
+                                self._dismiss_auth_issues()
+                                return True
+                            elif res_json.get("mfa_required"):
+                                _LOGGER.warning("Silent refresh requires two-factor OTP verification")
+                                return False
+                            else:
+                                _LOGGER.warning(
+                                    "Companion returned login failure: %s",
+                                    res_json.get("error", "authentication failed"),
+                                )
+                                self._reauth_failure_count += 1
+                                return False
+                        else:
+                            _LOGGER.warning("Companion returned HTTP %s during login", resp.status)
+                            self._reauth_failure_count += 1
+                            return False
+                except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
+                    _LOGGER.debug(
+                        "Could not reach auth server at %s",
+                        sanitize_url_for_logging(auth_url),
+                    )
+                    continue
+                except Exception as refresh_err:
+                    _LOGGER.warning(
+                        "Silent refresh via %s failed: %s",
+                        sanitize_url_for_logging(auth_url),
+                        refresh_err,
+                    )
+                    continue
 
-        self._reauth_failure_count += 1
-        return False
+            return False
 
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from PSE&G."""

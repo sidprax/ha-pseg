@@ -7,7 +7,7 @@ from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.components.frontend import add_extra_js_url
 import homeassistant.helpers.config_validation as cv
@@ -56,35 +56,44 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         except Exception as err:
             _LOGGER.debug("Could not register static paths: %s", err)
 
-    async def async_backfill_service(call):
-        """Handle backfill history service call."""
-        start_date = call.data.get("start_date")
-        end_date = call.data.get("end_date")
-
-        if start_date and not is_valid_date_str(str(start_date)):
-            raise HomeAssistantError(f"Invalid start_date '{start_date}'; expected YYYY-MM-DD")
-        if end_date and not is_valid_date_str(str(end_date)):
-            raise HomeAssistantError(f"Invalid end_date '{end_date}'; expected YYYY-MM-DD")
-
-        coordinators = list(hass.data.get(DOMAIN, {}).values())
-        if not coordinators:
-            raise HomeAssistantError("No active PSE&G integration entry found for backfill")
-
-        total_imported = 0
-        for coord in coordinators:
-            try:
-                count = await coord.async_backfill_history(start_date=start_date, end_date=end_date)
-                total_imported += count
-                _LOGGER.info("PSE&G backfill service completed: %d records imported", count)
-            except HomeAssistantError:
-                raise
-            except Exception as err:
-                _LOGGER.error("Error running PSE&G backfill service: %s", err)
-                raise HomeAssistantError(f"PSE&G backfill failed: {err}") from err
-
-    hass.services.async_register(DOMAIN, "backfill_history", async_backfill_service)
-
+    _async_register_backfill_service(hass)
     return True
+
+
+async def _async_handle_backfill_service(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Handle backfill history service call with validated date inputs."""
+    start_date = call.data.get("start_date")
+    end_date = call.data.get("end_date")
+
+    if start_date and not is_valid_date_str(str(start_date)):
+        raise HomeAssistantError(f"Invalid start_date '{start_date}'; expected YYYY-MM-DD")
+    if end_date and not is_valid_date_str(str(end_date)):
+        raise HomeAssistantError(f"Invalid end_date '{end_date}'; expected YYYY-MM-DD")
+
+    coordinators = list(hass.data.get(DOMAIN, {}).values())
+    if not coordinators:
+        raise HomeAssistantError("No active PSE&G integration entry found for backfill")
+
+    total_imported = 0
+    for coord in coordinators:
+        try:
+            count = await coord.async_backfill_history(start_date=start_date, end_date=end_date)
+            total_imported += count
+            _LOGGER.info("PSE&G backfill service completed: %d records imported", count)
+        except HomeAssistantError:
+            raise
+        except Exception as err:
+            _LOGGER.error("Error running PSE&G backfill service: %s", err)
+            raise HomeAssistantError(f"PSE&G backfill failed: {err}") from err
+
+
+def _async_register_backfill_service(hass: HomeAssistant) -> None:
+    """Register the backfill_history service if not already registered."""
+    if not hass.services.has_service(DOMAIN, "backfill_history"):
+        async def _backfill(call: ServiceCall) -> None:
+            await _async_handle_backfill_service(hass, call)
+
+        hass.services.async_register(DOMAIN, "backfill_history", _backfill)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -104,34 +113,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator.status = "auth_required"
         raise
 
-    if not hass.services.has_service(DOMAIN, "backfill_history"):
-        async def async_backfill_service(call):
-            """Handle backfill history service call."""
-            start_date = call.data.get("start_date")
-            end_date = call.data.get("end_date")
-
-            if start_date and not is_valid_date_str(str(start_date)):
-                raise HomeAssistantError(f"Invalid start_date '{start_date}'; expected YYYY-MM-DD")
-            if end_date and not is_valid_date_str(str(end_date)):
-                raise HomeAssistantError(f"Invalid end_date '{end_date}'; expected YYYY-MM-DD")
-
-            coordinators = list(hass.data.get(DOMAIN, {}).values())
-            if not coordinators:
-                raise HomeAssistantError("No active PSE&G integration entry found for backfill")
-
-            total_imported = 0
-            for coord in coordinators:
-                try:
-                    count = await coord.async_backfill_history(start_date=start_date, end_date=end_date)
-                    total_imported += count
-                    _LOGGER.info("PSE&G backfill service completed: %d records imported", count)
-                except HomeAssistantError:
-                    raise
-                except Exception as err:
-                    _LOGGER.error("Error running PSE&G backfill service: %s", err)
-                    raise HomeAssistantError(f"PSE&G backfill failed: {err}") from err
-
-        hass.services.async_register(DOMAIN, "backfill_history", async_backfill_service)
+    _async_register_backfill_service(hass)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))

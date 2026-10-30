@@ -48,6 +48,15 @@ for mod in [
 if "aiohttp" not in sys.modules:
     sys.modules["aiohttp"] = MagicMock()
 
+# Wire package hierarchy so submodule imports resolve to their configured stubs
+sys.modules["homeassistant"].util = sys.modules["homeassistant.util"]
+sys.modules["homeassistant.util"].dt = sys.modules["homeassistant.util.dt"]
+sys.modules["homeassistant"].helpers = sys.modules["homeassistant.helpers"]
+sys.modules["homeassistant.helpers"].aiohttp_client = sys.modules["homeassistant.helpers.aiohttp_client"]
+sys.modules["homeassistant.helpers"].update_coordinator = sys.modules["homeassistant.helpers.update_coordinator"]
+sys.modules["homeassistant"].components = sys.modules["homeassistant.components"]
+sys.modules["homeassistant.components"].persistent_notification = sys.modules["homeassistant.components.persistent_notification"]
+
 # Configure specific stubs
 coord_mod = sys.modules["homeassistant.helpers.update_coordinator"]
 coord_mod.DataUpdateCoordinator = FakeDataUpdateCoordinator
