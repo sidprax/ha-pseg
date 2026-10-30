@@ -45,8 +45,24 @@ for mod in [
         m.__path__ = []
         sys.modules[mod] = m
 
+class FakeClientError(Exception):
+    """Mock aiohttp.ClientError base class."""
+
+class FakeClientConnectorError(FakeClientError):
+    """Mock aiohttp.ClientConnectorError so exceptions derive from BaseException."""
+    def __init__(self, connection_key=None, os_error=None, *args, **kwargs):
+        self.os_error = os_error
+        super().__init__(os_error, *args)
+
 if "aiohttp" not in sys.modules:
-    sys.modules["aiohttp"] = MagicMock()
+    aio = MagicMock()
+    aio.ClientError = FakeClientError
+    aio.ClientConnectorError = FakeClientConnectorError
+    sys.modules["aiohttp"] = aio
+else:
+    aio = sys.modules["aiohttp"]
+    aio.ClientError = FakeClientError
+    aio.ClientConnectorError = FakeClientConnectorError
 
 # Wire package hierarchy so submodule imports resolve to their configured stubs
 sys.modules["homeassistant"].util = sys.modules["homeassistant.util"]

@@ -253,7 +253,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                             _LOGGER.warning("Companion returned HTTP %s during login", resp.status)
                             self._reauth_failure_count += 1
                             return False
-                except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
+                except (aiohttp.ClientConnectorError, aiohttp.ClientError, asyncio.TimeoutError, OSError):
                     _LOGGER.debug(
                         "Could not reach auth server at %s",
                         sanitize_url_for_logging(auth_url),
