@@ -34,6 +34,7 @@ from .const import (
     MFA_METHOD_SMS,
 )
 from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
+from .util import is_valid_auth_server_url
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +64,8 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         session = async_get_clientsession(self.hass)
         for base_url in candidate_urls:
+            if not is_valid_auth_server_url(base_url):
+                continue
             try:
                 async with session.get(
                     f"{base_url}/health",
@@ -218,7 +221,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     auth_result = ("mfa", None, target_url)
                                     break
                                 else:
-                                    _LOGGER.error("Auth helper response: %s", res_json)
+                                    _LOGGER.error("Auth helper failed: %s", res_json.get("error", "authentication failed"))
                                     errors["base"] = "invalid_auth"
                                     break
                             else:
@@ -229,7 +232,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 if resp.status == 403 or res_json.get("recaptcha_blocked"):
                                     errors["base"] = "recaptcha_blocked"
                                 elif resp.status == 500:
-                                    _LOGGER.error("Auth helper returned 500: %s", res_json)
+                                    _LOGGER.error("Auth helper returned 500: %s", res_json.get("error", "server error"))
                                     errors["base"] = "auth_server_error"
                                 else:
                                     errors["base"] = "invalid_auth"
@@ -438,7 +441,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     auth_result = ("mfa", None, target_url)
                                     break
                                 else:
-                                    _LOGGER.error("Auth helper response: %s", res_json)
+                                    _LOGGER.error("Auth helper failed: %s", res_json.get("error", "invalid authentication"))
                                     errors["base"] = "invalid_auth"
                                     break
                             else:
@@ -449,11 +452,10 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 if resp.status == 403 or res_json.get("recaptcha_blocked"):
                                     errors["base"] = "recaptcha_blocked"
                                 elif resp.status == 500:
-                                    _LOGGER.error("Auth helper returned 500: %s", res_json)
+                                    _LOGGER.error("Auth helper returned 500: %s", res_json.get("error", "server error"))
                                     errors["base"] = "auth_server_error"
                                 else:
-                                    err_text = await resp.text()
-                                    _LOGGER.error("Auth helper returned status %s: %s", resp.status, err_text)
+                                    _LOGGER.error("Auth helper returned HTTP %s", resp.status)
                                     errors["base"] = "invalid_auth"
                                 break
                     except aiohttp.ClientConnectorError:
@@ -716,6 +718,7 @@ class PsegOptionsFlowHandler(config_entries.OptionsFlow):
         self, user_input: Optional[Dict[str, Any]] = None
     ) -> FlowResult:
         """Manage the PSE&G options."""
+        errors: Dict[str, str] = {}
         if user_input is not None:
             # If user left rate empty or entered <= 0, normalize to None to enable 7-day average
             rate = user_input.get(CONF_ELECTRIC_RATE)
@@ -729,11 +732,16 @@ class PsegOptionsFlowHandler(config_entries.OptionsFlow):
             # Normalize auth_server_url (allow empty for cookie-only users)
             auth_url = user_input.get(CONF_AUTH_SERVER_URL)
             if auth_url:
-                user_input[CONF_AUTH_SERVER_URL] = auth_url.strip()
+                cleaned_url = auth_url.strip()
+                if not is_valid_auth_server_url(cleaned_url):
+                    errors["base"] = "invalid_auth_server_url"
+                else:
+                    user_input[CONF_AUTH_SERVER_URL] = cleaned_url
             else:
                 user_input[CONF_AUTH_SERVER_URL] = ""
 
-            return self.async_create_entry(title="", data=user_input)
+            if not errors:
+                return self.async_create_entry(title="", data=user_input)
 
         current_rate = self.config_entry.options.get(
             CONF_ELECTRIC_RATE,
@@ -765,4 +773,5 @@ class PsegOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="init",
             data_schema=options_schema,
+            errors=errors,
         )

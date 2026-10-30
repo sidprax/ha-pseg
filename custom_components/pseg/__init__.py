@@ -16,6 +16,7 @@ from homeassistant.helpers.typing import ConfigType
 from .const import CONF_COOKIE, DOMAIN
 from .coordinator import PsegDataUpdateCoordinator
 from .pseg_client import PsegClient
+from .util import is_valid_date_str
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +61,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         start_date = call.data.get("start_date")
         end_date = call.data.get("end_date")
 
+        if start_date and not is_valid_date_str(str(start_date)):
+            raise HomeAssistantError(f"Invalid start_date '{start_date}'; expected YYYY-MM-DD")
+        if end_date and not is_valid_date_str(str(end_date)):
+            raise HomeAssistantError(f"Invalid end_date '{end_date}'; expected YYYY-MM-DD")
+
         coordinators = list(hass.data.get(DOMAIN, {}).values())
         if not coordinators:
             raise HomeAssistantError("No active PSE&G integration entry found for backfill")
@@ -103,6 +109,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             """Handle backfill history service call."""
             start_date = call.data.get("start_date")
             end_date = call.data.get("end_date")
+
+            if start_date and not is_valid_date_str(str(start_date)):
+                raise HomeAssistantError(f"Invalid start_date '{start_date}'; expected YYYY-MM-DD")
+            if end_date and not is_valid_date_str(str(end_date)):
+                raise HomeAssistantError(f"Invalid end_date '{end_date}'; expected YYYY-MM-DD")
 
             coordinators = list(hass.data.get(DOMAIN, {}).values())
             if not coordinators:

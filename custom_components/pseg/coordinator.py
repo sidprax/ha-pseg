@@ -39,6 +39,7 @@ from .const import (
     DOMAIN,
 )
 from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
+from .util import is_valid_auth_server_url
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +64,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self.auth_required: bool = False
         self.status: str = "connected"
         self.last_successful_update: Optional[str] = None
+        self._last_reauth_attempt: Optional[datetime] = None
+        self._reauth_failure_count: int = 0
 
         # Resolve optional user-configured rate override (None enables auto-derived 7-day average)
         user_rate = None
@@ -156,11 +159,31 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         if not username or not password:
             return False
 
+        # Guard against rapid retry hammering and utility account lockout
+        now = dt_util.utcnow()
+        if self._last_reauth_attempt and (now - self._last_reauth_attempt).total_seconds() < 60:
+            _LOGGER.warning("PSE&G re-authentication cooldown active; skipping automated attempt")
+            return False
+
+        if self._reauth_failure_count >= 3:
+            _LOGGER.warning("Maximum automated re-authentication attempts reached (3); manual reconfiguration required")
+            return False
+
+        self._last_reauth_attempt = now
+
         configured_url = (
             (self.config_entry.options.get(CONF_AUTH_SERVER_URL) if self.config_entry else None)
             or self.entry_data.get(CONF_AUTH_SERVER_URL)
             or DEFAULT_AUTH_SERVER_URL
         )
+
+        if not is_valid_auth_server_url(configured_url):
+            _LOGGER.warning(
+                "Configured auth_server_url '%s' is untrusted or invalid; falling back to default %s",
+                configured_url,
+                DEFAULT_AUTH_SERVER_URL,
+            )
+            configured_url = DEFAULT_AUTH_SERVER_URL
 
         # Only probe user-configured companion URL (and local loopback alias if local)
         candidate_urls = [configured_url]
@@ -200,6 +223,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                             _LOGGER.info("Silent re-authentication successful via %s", auth_url)
                             self.auth_required = False
                             self.status = "connected"
+                            self._reauth_failure_count = 0
                             self._dismiss_auth_issues()
                             return True
                         elif res_json.get("mfa_required"):
@@ -208,6 +232,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             except Exception as refresh_err:
                 _LOGGER.warning("Silent refresh via %s failed: %s", auth_url, refresh_err)
 
+        self._reauth_failure_count += 1
         return False
 
     async def _async_update_data(self) -> Dict[str, Any]:

@@ -124,6 +124,9 @@
           "auth_server_url": "Companion Auth Server URL (Optional, for automated sign-in only)"
         }
       }
+    },
+    "error": {
+      "invalid_auth_server_url": "The companion auth server URL must use http on loopback/private networks or https for remote hosts."
     }
   },
   "issues": {
