@@ -55,7 +55,7 @@ Option 1 allows connecting directly without running background containers. It re
    - Open the invitation email, click the link, and choose a password and security question.
 3. **Capture the cookie**:
    - In your desktop browser, go directly to [mysmartenergy.nj.pseg.com](https://mysmartenergy.nj.pseg.com).
-   - Sign in using your **invited email address** and password. Click **Login**.
+   - Sign in using your **invited email address** and password, and check **Remember Me**. Click **Login**.
    - After the dashboard loads, press **F12** (Developer Tools).
    - Switch to the **Network** tab and refresh the page (**F5**).
    - Click any request to `mysmartenergy.nj.pseg.com` (such as `Dashboard` or `GetIntervalData`).
@@ -119,10 +119,10 @@ Uses a temporary session cookie copied from an active primary account browser se
 
 ## Session Keep-Alive
 
-MyMeter ends a session after about 10 minutes without requests, while the integration only fetches new data every 4 hours. To keep a pasted cookie (Options 1 and 4) working between updates, the integration sends one small request to MyMeter every 4 to 5 minutes, plus one when Home Assistant shuts down.
+MyMeter ends a session after several minutes (measured between 6 to 8 minutes) without requests, while the integration only fetches new data every 4 hours. To keep a pasted cookie (Options 1 and 4) working between updates, the integration sends one small request to MyMeter every 4 to 5 minutes, plus one when Home Assistant shuts down.
 
 - **On by default for Options 1 and 4**: A pasted cookie can't be renewed without you, so the session has to stay alive.
 - **Off by default for Options 2 and 3**: The companion add-on signs in again when a session has expired.
 - **Change it**: Settings > Devices & Services > PSE&G > Configure > **Keep Session Alive**.
 - **When it stops**: Once MyMeter reports the session as expired, no more requests are sent until you sign in again. Home Assistant shows a notification and a repair with what to do.
-- **Limits**: If Home Assistant is off or can't reach MyMeter for more than about 10 minutes (a restart that takes long, an internet outage, portal maintenance), the session still expires and needs a new cookie.
+- **Limits**: If Home Assistant is off or can't reach MyMeter for more than several minutes (a restart that takes long, an internet outage, portal maintenance), the session still expires and needs a new cookie.
