@@ -22,6 +22,7 @@ from .const import (
     CONF_AUTH_TYPE,
     CONF_COOKIE,
     CONF_ELECTRIC_RATE,
+    CONF_KEEP_ALIVE,
     CONF_MFA_CODE,
     CONF_MFA_METHOD,
     CONF_PASSWORD,
@@ -33,6 +34,7 @@ from .const import (
     MFA_METHOD_EMAIL,
     MFA_METHOD_SMS,
 )
+from .coordinator import keep_alive_enabled
 from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
 from .util import get_valid_auth_server_url, is_valid_auth_server_url, sanitize_url_for_logging
 
@@ -824,6 +826,12 @@ class PsegOptionsFlowHandler(config_entries.OptionsFlow):
 
         auth_url_val = str(current_auth_url) if current_auth_url else ""
         schema_dict[vol.Optional(CONF_AUTH_SERVER_URL, default=auth_url_val)] = str
+        schema_dict[
+            vol.Optional(
+                CONF_KEEP_ALIVE,
+                default=keep_alive_enabled(self.config_entry.data, self.config_entry.options),
+            )
+        ] = bool
 
         options_schema = vol.Schema(schema_dict)
 

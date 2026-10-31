@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 import logging
+import random
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -32,12 +33,15 @@ from .const import (
     CONF_AUTH_TYPE,
     CONF_COOKIE,
     CONF_ELECTRIC_RATE,
+    CONF_KEEP_ALIVE,
     CONF_PASSWORD,
     CONF_USERNAME,
     DEFAULT_AUTH_SERVER_URL,
     DEFAULT_ELECTRIC_RATE,
     DEFAULT_SCAN_INTERVAL_HOURS,
     DOMAIN,
+    KEEPALIVE_MAX_SECONDS,
+    KEEPALIVE_MIN_SECONDS,
 )
 from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
 from .util import get_valid_auth_server_url, is_valid_auth_server_url, sanitize_url_for_logging
@@ -63,6 +67,23 @@ class ReauthStatus:
 
     def __repr__(self) -> str:
         return f"ReauthStatus({self.status!r})"
+
+
+def keep_alive_enabled(data: Dict[str, Any], options: Dict[str, Any]) -> bool:
+    """Return whether to keep the MyMeter session alive between scheduled updates.
+
+    On by default for pasted cookies, which cannot be renewed without the user.
+    Off by default for companion add-on sign-ins, which sign in again when a
+    session has expired.
+    """
+    if CONF_KEEP_ALIVE in options:
+        return bool(options[CONF_KEEP_ALIVE])
+    return data.get(CONF_AUTH_TYPE) == AUTH_TYPE_COOKIE or not data.get(CONF_USERNAME)
+
+
+def next_keep_alive_delay() -> float:
+    """Return seconds until the next keep-alive, varied so requests don't come on a fixed beat."""
+    return random.uniform(KEEPALIVE_MIN_SECONDS, KEEPALIVE_MAX_SECONDS)
 
 
 class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
@@ -308,6 +329,45 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 # Stamp the cooldown timestamp when the attempt finishes
                 self._last_reauth_attempt = dt_util.utcnow()
 
+    def _store_renewed_cookie(self) -> None:
+        """Save a cookie MyMeter renewed, so a restart starts from the current session."""
+        cookie = self.client.cookie
+        if not cookie or cookie == self.entry_data.get(CONF_COOKIE):
+            return
+        self.entry_data[CONF_COOKIE] = cookie
+        if self.config_entry:
+            self.hass.config_entries.async_update_entry(
+                self.config_entry,
+                data={**self.config_entry.data, CONF_COOKIE: cookie},
+            )
+        _LOGGER.debug("Stored renewed MyMeter cookie")
+
+    async def async_keep_alive(self, timeout: float = 20) -> bool:
+        """Make a request between scheduled updates so MyMeter keeps the session alive.
+
+        Returns False only when the portal could not be reached, so the caller can retry soon.
+        """
+        # Re-authentication is already pending; pinging a dead session would only repeat it
+        if self.auth_required or not self.client.cookie:
+            return True
+        try:
+            await self.hass.async_add_executor_job(self.client.keep_alive, timeout)
+        except PsegConnectionError as err:
+            _LOGGER.debug("Keep-alive: PSE&G portal not reachable: %s", err)
+            return False
+        except PsegAuthError as err:
+            if self.hass.is_stopping:
+                return True
+            # No more pings until the session is renewed; the regular update path
+            # re-authenticates via the add-on or asks the user to
+            self.auth_required = True
+            _LOGGER.info("Keep-alive: MyMeter session expired (%s), refreshing", err)
+            await self.async_request_refresh()
+            return True
+        self._store_renewed_cookie()
+        _LOGGER.debug("Keep-alive: MyMeter session still valid")
+        return True
+
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from PSE&G."""
         try:
@@ -332,6 +392,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             self.status = "connected"
             self._reauth_failure_count = 0
             self._dismiss_auth_issues()
+            self._store_renewed_cookie()
             return data
         except PsegConnectionError as err:
             self.status = "error"

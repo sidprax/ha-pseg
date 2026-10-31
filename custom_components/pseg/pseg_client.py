@@ -12,6 +12,7 @@ import math
 import re
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import requests
@@ -21,6 +22,9 @@ from .const import DEFAULT_ELECTRIC_RATE
 _LOGGER = logging.getLogger(__name__)
 
 BASE_URL = "https://mysmartenergy.nj.pseg.com"
+# Requested by the keep-alive between scheduled updates: the dashboard's widget
+# loader with an empty region, about 100 bytes, instead of the whole dashboard page
+KEEPALIVE_PATH = "/Widget/LoadWidgets"
 # The portal's local time zone; MyMeter timestamps are wall-clock times in it.
 PORTAL_TIMEZONE = ZoneInfo("America/New_York")
 
@@ -61,6 +65,16 @@ def point_value(pt: Dict[str, Any]) -> Optional[float]:
     return value
 
 
+def is_login_url(url: str) -> bool:
+    """Return whether the portal sent a request to its sign-in page.
+
+    MyMeter redirects requests of an expired session to the portal root, where
+    the sign-in form lives, sometimes with the original query string appended.
+    """
+    url = url.lower()
+    return urlparse(url).path in ("", "/") or "signin" in url or "login" in url
+
+
 class PsegAuthError(Exception):
     """Exception raised for authentication or session failures."""
 
@@ -96,23 +110,95 @@ class PsegClient:
         self.update_cookie(cookie)
 
     def update_cookie(self, new_cookie: str) -> None:
-        """Update active session cookies."""
-        self.cookie = new_cookie
-        self.session.headers.update({"Cookie": new_cookie})
+        """Update active session cookies.
 
-    def test_connection(self) -> bool:
+        The cookies go into the session's cookie jar rather than a fixed Cookie
+        header: MyMeter extends a session by sending a new MM_SID with
+        Set-Cookie (its expiry is part of the value), and only the jar picks
+        that up. A fixed header would keep sending the original until it runs out.
+        """
+        self.cookie = new_cookie
+        self.session.cookies.clear()
+        host = urlparse(BASE_URL).hostname
+        for part in new_cookie.split(";"):
+            name, separator, value = part.strip().partition("=")
+            if separator and name:
+                self.session.cookies.set(name, value, domain=host, path="/")
+
+    def _remember_renewed_cookies(self) -> None:
+        """Take over cookies MyMeter renewed; call only after a response showed a valid session.
+
+        A renewal sent with a Domain attribute is stored next to the host-only cookie
+        from update_cookie(), so the jar can hold two copies of a name. The copy whose
+        value differs from the stored one is the renewal; the other is dropped.
+        """
+        stored = dict(
+            part.strip().partition("=")[::2] for part in self.cookie.split(";") if "=" in part
+        )
+        copies: Dict[str, list] = {}
+        for c in self.session.cookies:
+            copies.setdefault(c.name, []).append(c)
+        for name, same_name in copies.items():
+            if len(same_name) < 2:
+                continue
+            renewed = [c for c in same_name if c.value != stored.get(name)] or same_name
+            for c in same_name:
+                if c is not renewed[-1]:
+                    self.session.cookies.clear(c.domain, c.path, c.name)
+        cookie = "; ".join(f"{c.name}={c.value}" for c in self.session.cookies)
+        if cookie and cookie != self.cookie:
+            _LOGGER.debug("MyMeter renewed the session cookie")
+            self.cookie = cookie
+
+    def test_connection(self, timeout: float = 20) -> bool:
         """Validate whether current session cookie is authorized."""
         try:
-            resp = self.session.get(f"{BASE_URL}/Dashboard", allow_redirects=True, timeout=20)
+            resp = self.session.get(f"{BASE_URL}/Dashboard", allow_redirects=True, timeout=timeout)
             if resp.status_code in (401, 403):
                 raise PsegAuthError(f"HTTP status {resp.status_code} received from portal")
             if resp.status_code != 200:
                 raise PsegConnectionError(f"HTTP status {resp.status_code} received from portal")
-            if "signin" in resp.url.lower() or "login" in resp.url.lower():
+            if is_login_url(resp.url):
                 raise PsegAuthError("Session cookie expired or rejected by portal")
+            self._remember_renewed_cookies()
             return True
         except requests.RequestException as err:
             raise PsegConnectionError(f"Failed to connect to PSE&G: {err}") from err
+
+    def keep_alive(self, timeout: float = 20) -> None:
+        """Make one request so MyMeter does not end the session for being idle.
+
+        Sent like the dashboard's own widget requests, but with an empty region, so no
+        widgets are returned. MyMeter still counts it as activity, and answers it for an
+        expired session with a JSON redirect to the sign-in page
+        (or an HTTP redirect, which is not followed, so the sign-in page isn't downloaded).
+        """
+        try:
+            resp = self.session.get(
+                f"{BASE_URL}{KEEPALIVE_PATH}",
+                params={"Region": "", "_": int(time.time() * 1000)},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+                allow_redirects=False,
+                timeout=timeout,
+            )
+        except requests.RequestException as err:
+            raise PsegConnectionError(f"Failed to connect to PSE&G: {err}") from err
+        if resp.status_code in (401, 403):
+            raise PsegAuthError(f"HTTP status {resp.status_code} received from portal")
+        if resp.is_redirect and is_login_url(resp.headers.get("Location", "")):
+            raise PsegAuthError("Session expired: Redirected to login")
+        if resp.status_code != 200:
+            raise PsegConnectionError(f"HTTP status {resp.status_code} received from portal")
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and any(
+            isinstance(ar, dict) and ar.get("Action") == "Redirect"
+            for ar in data.get("AjaxResults") or []
+        ):
+            raise PsegAuthError("Session expired: Redirected to login")
+        self._remember_renewed_cookies()
 
     def _get_verification_token(self) -> str:
         """Extract __RequestVerificationToken from the /Dashboard page."""
@@ -122,8 +208,9 @@ class PsegClient:
                 raise PsegAuthError(f"HTTP status {resp.status_code} received from portal")
             if resp.status_code != 200:
                 raise PsegConnectionError(f"HTTP status {resp.status_code} received from portal")
-            if "signin" in resp.url.lower() or "login" in resp.url.lower():
+            if is_login_url(resp.url):
                 raise PsegAuthError("Session expired: Redirected to login")
+            self._remember_renewed_cookies()
             dash_html = resp.text
         except requests.RequestException as err:
             raise PsegConnectionError(f"Network error on Dashboard: {err}") from err

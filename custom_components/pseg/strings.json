@@ -122,7 +122,11 @@
         "description": "Configure electricity rate override and companion authentication service settings.",
         "data": {
           "electric_rate": "Custom Electricity Rate ($/kWh, leave empty for auto-derived 7-day average)",
-          "auth_server_url": "Companion Auth Server URL (Optional, for automated sign-in only)"
+          "auth_server_url": "Companion Auth Server URL (Optional, for automated sign-in only)",
+          "keep_alive": "Keep Session Alive"
+        },
+        "data_description": {
+          "keep_alive": "Sends a small request to MyMeter every 4 to 5 minutes so the session doesn't time out between updates (it ends after about 10 minutes without requests). Needed for browser session cookies; with the companion add-on, an expired session is signed in again automatically instead."
         }
       }
     },

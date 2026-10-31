@@ -10,6 +10,7 @@ CONF_MFA_CODE = "mfa_code"
 CONF_AUTH_SERVER_URL = "auth_server_url"
 CONF_ELECTRIC_RATE = "electric_rate"
 CONF_AUTH_TYPE = "auth_type"
+CONF_KEEP_ALIVE = "keep_alive"
 
 AUTH_TYPE_MYMETER = "mymeter"
 AUTH_TYPE_OKTA = "okta"
@@ -17,6 +18,12 @@ AUTH_TYPE_COOKIE = "cookie"
 
 DEFAULT_MFA_METHOD = "sms"
 DEFAULT_SCAN_INTERVAL_HOURS = 4
+# MyMeter sessions time out after about 10 minutes without requests; with pings
+# every 10 minutes they still expired at random, every 4 minutes they stay alive.
+# Each delay is picked at random within this range rather than on a fixed beat.
+KEEPALIVE_MIN_SECONDS = 4 * 60
+KEEPALIVE_MAX_SECONDS = 5 * 60
+KEEPALIVE_RETRY_SECONDS = 60
 DEFAULT_AUTH_SERVER_URL = "http://127.0.0.1:8000"
 DEFAULT_ELECTRIC_RATE = 0.247
 

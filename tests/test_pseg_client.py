@@ -26,6 +26,7 @@ for mod in [
     "homeassistant.helpers",
     "homeassistant.helpers.aiohttp_client",
     "homeassistant.helpers.config_validation",
+    "homeassistant.helpers.event",
     "homeassistant.helpers.typing",
     "homeassistant.helpers.update_coordinator",
     "homeassistant.util",
@@ -219,7 +220,7 @@ class TestClientMethods(unittest.TestCase):
         client = PsegClient(cookie="old_cookie=123")
         client.update_cookie("new_cookie=456")
         self.assertEqual(client.cookie, "new_cookie=456")
-        self.assertEqual(client.session.headers.get("Cookie"), "new_cookie=456")
+        self.assertEqual(client.session.cookies.get_dict(), {"new_cookie": "456"})
 
 
 if __name__ == "__main__":

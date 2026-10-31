@@ -11,9 +11,9 @@ This guide provides step-by-step instructions and tradeoffs for all four support
 | Method | Recommended For | Add-on Needed? | 2FA / OTP Prompts | Cookie Lifespan | Automated Renewal | Initial Setup Effort |
 |---|---|---|---|---|---|---|
 | [Option 2: Direct MyMeter Automated Sign-In (Recommended)](#option-2-direct-mymeter-automated-sign-in-recommended-with-add-on) | **Recommended**. Fully automated hands-off background renewal with zero 2FA prompts. | Yes ([Auth Add-on](https://github.com/sidprax/ha-pseg-auth-addon)) | None | Auto-renewed | Fully automated and silent | Low (one-time email invite) |
-| [Option 1: Direct MyMeter Browser Cookie](#option-1-direct-mymeter-browser-cookie-manual-no-add-on) | Users who prefer not running any companion add-on and don't mind periodic manual cookie re-entry. | No | None | Expires periodically (~24 hours) | Manual re-paste on expiration | Low (one-time email invite) |
+| [Option 1: Direct MyMeter Browser Cookie](#option-1-direct-mymeter-browser-cookie-manual-no-add-on) | Users who prefer not running any companion add-on and don't mind periodic manual cookie re-entry. | No | None | Kept alive while Home Assistant runs (expires after about 10 minutes without requests) | Manual re-paste on expiration | Low (one-time email invite) |
 | [Option 3: Primary PSE&G Account Automated Sign-In](#option-3-primary-pseg-account-automated-sign-in-with-add-on-okta-2fa) | Users who prefer using their existing `pseg.com` login and don't mind entering SMS/Email OTP codes. | Yes ([Auth Add-on](https://github.com/sidprax/ha-pseg-auth-addon)) | SMS or Email OTP on setup and renewal | Auto-renewed | Requires OTP entry when prompted | Very Low (uses existing login) |
-| [Option 4: Primary PSE&G Account Session Cookie](#option-4-primary-pseg-account-session-cookie-manual-no-add-on) | Quick testing or users who only want to use their primary account without installing the companion add-on. | No | None (handled during browser login) | Short-lived (expires with browser session) | Manual re-paste on expiration | Very Low (copy from browser DevTools) |
+| [Option 4: Primary PSE&G Account Session Cookie](#option-4-primary-pseg-account-session-cookie-manual-no-add-on) | Quick testing or users who only want to use their primary account without installing the companion add-on. | No | None (handled during browser login) | Kept alive while Home Assistant runs (expires after about 10 minutes without requests) | Manual re-paste on expiration | Very Low (copy from browser DevTools) |
 
 ---
 
@@ -43,7 +43,7 @@ This guide provides step-by-step instructions and tradeoffs for all four support
 
 ## Option 1: Direct MyMeter Browser Cookie (Manual, No Add-on)
 
-Option 1 allows connecting directly without running background containers. It requires zero SMS or Email OTP prompts, but sessions expire periodically (~24 hours) on the MyMeter portal, requiring manual cookie re-entry upon expiration.
+Option 1 allows connecting directly without running background containers. It requires zero SMS or Email OTP prompts. MyMeter ends a session after about 10 minutes without requests, so the integration keeps it alive between updates (see [Session Keep-Alive](#session-keep-alive)). You only need to paste a new cookie after Home Assistant was offline for longer than that.
 
 ### Step-by-Step Setup:
 1. **Invite a secondary email on MyMeter**:
@@ -70,7 +70,7 @@ Option 1 allows connecting directly without running background containers. It re
   - No companion add-on or Docker required: Works on Home Assistant Core, Container, Supervised, and OS.
   - Zero 2FA prompts: Does not rely on Okta MFA, SMS codes, or phone numbers.
 - **Cons**:
-  - Manual re-entry on expiration: Sessions expire periodically (~24 hours), requiring re-pasting via Settings > Devices & Services > PSE&G > Reconfigure.
+  - Manual re-entry when Home Assistant is offline: The session expires after about 10 minutes without requests, and you then need to paste a new cookie via Settings > Devices & Services > PSE&G > Reconfigure.
 
 ---
 
@@ -113,5 +113,16 @@ Uses a temporary session cookie copied from an active primary account browser se
   - Zero add-on dependencies.
   - Uses existing primary login.
 - **Cons**:
-  - Short session lifespan: Session cookies expire when the browser session ends.
-  - Requires frequent manual re-entry.
+  - Manual re-entry when Home Assistant is offline: The session expires after about 10 minutes without requests, and you then need to paste a new cookie via Settings > Devices & Services > PSE&G > Reconfigure.
+
+---
+
+## Session Keep-Alive
+
+MyMeter ends a session after about 10 minutes without requests, while the integration only fetches new data every 4 hours. To keep a pasted cookie (Options 1 and 4) working between updates, the integration sends one small request to MyMeter every 4 to 5 minutes, plus one when Home Assistant shuts down.
+
+- **On by default for Options 1 and 4**: A pasted cookie can't be renewed without you, so the session has to stay alive.
+- **Off by default for Options 2 and 3**: The companion add-on signs in again when a session has expired.
+- **Change it**: Settings > Devices & Services > PSE&G > Configure > **Keep Session Alive**.
+- **When it stops**: Once MyMeter reports the session as expired, no more requests are sent until you sign in again. Home Assistant shows a notification and a repair with what to do.
+- **Limits**: If Home Assistant is off or can't reach MyMeter for more than about 10 minutes (a restart that takes long, an internet outage, portal maintenance), the session still expires and needs a new cookie.

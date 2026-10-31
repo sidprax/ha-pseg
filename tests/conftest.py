@@ -34,6 +34,7 @@ for mod in [
     "homeassistant.helpers",
     "homeassistant.helpers.aiohttp_client",
     "homeassistant.helpers.config_validation",
+    "homeassistant.helpers.event",
     "homeassistant.helpers.issue_registry",
     "homeassistant.helpers.typing",
     "homeassistant.helpers.update_coordinator",

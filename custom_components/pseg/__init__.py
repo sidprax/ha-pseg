@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import logging
 from pathlib import Path
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
+from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.components.frontend import add_extra_js_url
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CONF_COOKIE, DOMAIN
-from .coordinator import PsegDataUpdateCoordinator
+from .const import CONF_COOKIE, DOMAIN, KEEPALIVE_RETRY_SECONDS
+from .coordinator import (
+    PsegDataUpdateCoordinator,
+    keep_alive_enabled,
+    next_keep_alive_delay,
+)
 from .pseg_client import PsegClient
 from .util import is_valid_date_str
 
@@ -118,10 +125,50 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _async_register_backfill_service(hass)
 
+    if keep_alive_enabled(entry.data, entry.options):
+        _async_start_keep_alive(hass, entry, coordinator)
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     return True
+
+
+def _async_start_keep_alive(
+    hass: HomeAssistant, entry: ConfigEntry, coordinator: PsegDataUpdateCoordinator
+) -> None:
+    """Keep the MyMeter session alive between the scheduled updates until the entry unloads."""
+    state: dict[str, Any] = {"cancel": None, "retrying": False, "stopped": False}
+
+    @callback
+    def async_schedule(delay: float) -> None:
+        state["cancel"] = async_call_later(hass, delay, async_keep_alive)
+
+    async def async_keep_alive(now: datetime) -> None:
+        reachable = await coordinator.async_keep_alive()
+        if state["stopped"]:
+            return
+        # One missed ping already means about twice the usual gap without a request, close
+        # to the idle timeout, so retry once soon instead of waiting for the next delay
+        state["retrying"] = not reachable and not state["retrying"]
+        async_schedule(KEEPALIVE_RETRY_SECONDS if state["retrying"] else next_keep_alive_delay())
+
+    @callback
+    def async_stop_keep_alive() -> None:
+        state["stopped"] = True
+        if state["cancel"]:
+            state["cancel"]()
+
+    async def async_keep_alive_on_stop(event: Event) -> None:
+        """Touch the session right before shutdown, so a restart only has to beat the idle timeout."""
+        # Short timeout so a slow portal can't hold up the shutdown
+        await coordinator.async_keep_alive(timeout=10)
+
+    async_schedule(next_keep_alive_delay())
+    entry.async_on_unload(async_stop_keep_alive)
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, async_keep_alive_on_stop)
+    )
 
 
 async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
