@@ -23,6 +23,7 @@ Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / 
 - **14-Day History**: Provides 14 days of interval usage and cost data in entity state attributes for local charting.
 - **Manual Refresh**: Includes a refresh button (`button.pseg_refresh_data`) to trigger an immediate data fetch.
 - **Auto-Registered Lovelace Card**: Bundles `pseg-energy-card` automatically registered into frontend resources and ready to add from the card picker.
+- **Diagnostics Download**: Download a debug file with cookies, passwords, and account details removed, ready to attach to an issue. See [Reporting a Problem](#reporting-a-problem).
 
 ## Authentication Methods
 
@@ -171,6 +172,16 @@ entity: sensor.pseg_electricity_consumption
 - `sensor.pseg_outdoor_temperature`: Recorded low, average, and high temperatures
 - `sensor.pseg_next_update`: Timestamp of the next scheduled polling attempt
 - `button.pseg_refresh_data`: Button to trigger an immediate portal sync
+
+## Reporting a Problem
+
+If something isn't working, attach a diagnostics file to your [GitHub issue](https://github.com/sidprax/ha-pseg/issues):
+
+1. Go to **Settings > Devices & Services** and open **PSE&G Energy**.
+2. Open the menu (three dots) on your entry and select **Download diagnostics**.
+3. Attach the downloaded file to the issue.
+
+The file shows the connection status, sign-in method, whether keep-alive is on, update times, which cookies are present, and your latest readings. Cookie values, passwords, MFA codes, your username, and the meter name are removed, and the add-on address keeps only its host and port. Please still look the file over before posting it.
 
 ## License
 
