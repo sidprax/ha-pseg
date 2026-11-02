@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import logging
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import aiohttp
 import voluptuous as vol
@@ -26,17 +27,25 @@ from .const import (
     CONF_MFA_CODE,
     CONF_MFA_METHOD,
     CONF_PASSWORD,
+    CONF_PORTAL_URL,
     CONF_USERNAME,
     DEFAULT_AUTH_SERVER_URL,
     DEFAULT_ELECTRIC_RATE,
     DEFAULT_MFA_METHOD,
+    DEFAULT_PORTAL_URL,
     DOMAIN,
     MFA_METHOD_EMAIL,
     MFA_METHOD_SMS,
+    PORTALS,
 )
 from .coordinator import keep_alive_enabled
 from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
-from .util import get_valid_auth_server_url, is_valid_auth_server_url, sanitize_url_for_logging
+from .util import (
+    get_portal_url,
+    get_valid_auth_server_url,
+    is_valid_auth_server_url,
+    sanitize_url_for_logging,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -50,6 +59,21 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize the flow."""
         self._user_input: Dict[str, Any] = {}
         self._reauth_entry: Optional[config_entries.ConfigEntry] = None
+        self._portal_url = DEFAULT_PORTAL_URL
+
+    @property
+    def _cookie_only(self) -> bool:
+        """Whether the portal supports only manual cookies.
+
+        Okta is PSE&G New Jersey's sign-in, and the companion add-on signs in to
+        the NJ portal only, so every other portal starts with a browser cookie.
+        """
+        return self._portal_url != DEFAULT_PORTAL_URL
+
+    @property
+    def _portal_placeholders(self) -> Dict[str, str]:
+        """Placeholders for cookie steps that name the portal to sign in to."""
+        return {"portal_host": urlparse(self._portal_url).hostname or self._portal_url}
 
     async def _async_detect_auth_server(self) -> Optional[str]:
         """Probe candidate URLs to detect if the companion auth add-on is running."""
@@ -90,7 +114,24 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: Optional[Dict[str, Any]] = None
     ) -> FlowResult:
-        """Step 1: Choose connection method."""
+        """Step 1: Choose the MyMeter portal."""
+        if user_input is not None:
+            self._portal_url = user_input[CONF_PORTAL_URL]
+            if self._cookie_only:
+                return await self.async_step_cookie()
+            return await self.async_step_auth_method()
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_PORTAL_URL, default=DEFAULT_PORTAL_URL): vol.In(PORTALS)}
+            ),
+        )
+
+    async def async_step_auth_method(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> FlowResult:
+        """Step 2: Choose connection method."""
         working_url = await self._async_detect_auth_server()
         if working_url:
             menu_options = [
@@ -112,7 +153,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
         return self.async_show_menu(
-            step_id="user",
+            step_id="auth_method",
             menu_options=menu_options,
             description_placeholders={"addon_status": addon_status},
         )
@@ -124,6 +165,9 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._reauth_entry = self.hass.config_entries.async_get_entry(
             self.context["entry_id"]
         )
+        self._portal_url = get_portal_url(self._reauth_entry.data)
+        if self._cookie_only:
+            return await self.async_step_cookie()
         working_url = await self._async_detect_auth_server()
         if working_url:
             menu_options = ["reauth_confirm", "cookie_mymeter", "cookie_okta"]
@@ -149,6 +193,9 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._reauth_entry = self.hass.config_entries.async_get_entry(
             self.context["entry_id"]
         )
+        self._portal_url = get_portal_url(self._reauth_entry.data)
+        if self._cookie_only:
+            return await self.async_step_cookie()
         working_url = await self._async_detect_auth_server()
         if working_url:
             menu_options = [
@@ -407,6 +454,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_PASSWORD: password,
                             CONF_AUTH_SERVER_URL: auth_url,
                             CONF_AUTH_TYPE: AUTH_TYPE_MYMETER,
+                            CONF_PORTAL_URL: self._portal_url,
                         },
                     )
 
@@ -540,6 +588,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 CONF_PASSWORD: password,
                                 CONF_AUTH_SERVER_URL: target_url,
                                 CONF_AUTH_TYPE: AUTH_TYPE_OKTA,
+                                CONF_PORTAL_URL: self._portal_url,
                             },
                         )
                     elif action == "mfa":
@@ -648,6 +697,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_USERNAME: username,
                             CONF_PASSWORD: password,
                             CONF_AUTH_SERVER_URL: auth_url,
+                            CONF_PORTAL_URL: self._portal_url,
                         },
                     )
 
@@ -670,7 +720,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Helper to validate cookie and create or update the config entry."""
         cookie_valid = False
         try:
-            client = PsegClient(cookie)
+            client = PsegClient(cookie, portal_url=self._portal_url)
             await self.hass.async_add_executor_job(client.test_connection)
             cookie_valid = True
         except PsegAuthError as err:
@@ -678,6 +728,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(
                 step_id=step_id,
                 data_schema=vol.Schema({vol.Required(CONF_COOKIE): str}),
+                description_placeholders=self._portal_placeholders,
                 errors={"base": "invalid_cookie"},
             )
         except PsegConnectionError as err:
@@ -685,6 +736,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(
                 step_id=step_id,
                 data_schema=vol.Schema({vol.Required(CONF_COOKIE): str}),
+                description_placeholders=self._portal_placeholders,
                 errors={"base": "cannot_connect"},
             )
         except Exception as err:
@@ -692,6 +744,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_show_form(
                 step_id=step_id,
                 data_schema=vol.Schema({vol.Required(CONF_COOKIE): str}),
+                description_placeholders=self._portal_placeholders,
                 errors={"base": "unknown"},
             )
 
@@ -710,6 +763,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data={
                     CONF_COOKIE: cookie,
                     CONF_AUTH_TYPE: auth_type,
+                    CONF_PORTAL_URL: self._portal_url,
                 },
             )
 
@@ -758,8 +812,24 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_cookie(
         self, user_input: Optional[Dict[str, Any]] = None
     ) -> FlowResult:
-        """Alias for backwards compatibility."""
-        return await self.async_step_cookie_mymeter(user_input)
+        """Browser cookie from any sign-in to the selected portal."""
+        errors: Dict[str, str] = {}
+        if user_input is not None:
+            cookie = user_input.get(CONF_COOKIE, "").strip()
+            if not cookie:
+                errors["base"] = "missing_credentials"
+            else:
+                return await self._async_validate_and_create_cookie_entry(
+                    cookie, step_id="cookie", auth_type=AUTH_TYPE_COOKIE
+                )
+
+        schema = vol.Schema({vol.Required(CONF_COOKIE): str})
+        return self.async_show_form(
+            step_id="cookie",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders=self._portal_placeholders,
+        )
 
     @staticmethod
     @callback

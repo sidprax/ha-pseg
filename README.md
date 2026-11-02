@@ -105,12 +105,13 @@ This companion add-on is required for automated headless sign-in (**Option 2 (Re
 
 1. In Home Assistant, go to **Settings** > **Devices & Services** > **Add Integration**.
 2. Search for **PSE&G Energy (New Jersey)**.
-3. Select your preferred authentication method from the menu:
+3. Select your portal: **PSE&G New Jersey** (default) or **PSEG Long Island (experimental)**. Long Island supports only a pasted browser cookie, see [PSEG Long Island (Experimental)](docs/authentication.md#pseg-long-island-experimental).
+4. Select your preferred authentication method from the menu:
    - **Automated Sign-In: Direct MyMeter (Recommended, Zero 2FA)**
    - **Persistent Browser Cookie: Direct MyMeter (Manual, No Add-on)**
    - **Automated Sign-In: Primary PSE&G Account (Okta 2FA)**
    - **Session Browser Cookie: Primary PSE&G Account**
-4. Follow the on-screen prompts for your selected method and click **Submit**.
+5. Follow the on-screen prompts for your selected method and click **Submit**.
 
 ## Home Assistant Energy Dashboard
 

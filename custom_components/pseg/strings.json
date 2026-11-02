@@ -2,6 +2,13 @@
   "config": {
     "step": {
       "user": {
+        "title": "Connect PSEG Account",
+        "description": "Select the MyMeter portal your account belongs to. Long Island is experimental: Only a browser cookie works there, and it has not been tested by a Long Island customer yet.",
+        "data": {
+          "portal_url": "Portal"
+        }
+      },
+      "auth_method": {
         "title": "Connect PSE&G Account",
         "description": "{addon_status}Select how you would like to connect your PSE&G MySmartEnergy account:",
         "menu_options": {
@@ -55,7 +62,7 @@
       },
       "cookie": {
         "title": "Browser Session Cookie",
-        "description": "Authenticate directly using an active session cookie from your web browser.\n\n**How to get your cookie:**\n1. In your browser, log in to the PSE&G portal (mysmartenergy.nj.pseg.com)\n2. Press **F12** (or right-click → **Inspect**) to open Developer Tools\n3. Click the **Network** tab, then refresh the page (F5)\n4. Click any request to mysmartenergy.nj.pseg.com (e.g. `Dashboard`)\n5. In **Request Headers**, copy the full value of the `Cookie:` header and paste it below.",
+        "description": "Authenticate directly using an active session cookie from your web browser.\n\n**How to get your cookie:**\n1. In your browser, sign in to your MyMeter portal ({portal_host})\n2. Press **F12** (or right-click → **Inspect**) to open Developer Tools\n3. Click the **Network** tab, then refresh the page (F5)\n4. Click any request to {portal_host} (e.g. `Dashboard`)\n5. In **Request Headers**, copy the full value of the `Cookie:` header and paste it below.",
         "data": {
           "cookie": "Session Cookie"
         }

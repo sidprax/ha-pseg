@@ -1,6 +1,6 @@
-"""PSEG API Client for Home Assistant (New Jersey).
+"""PSEG API Client for Home Assistant.
 
-Uses session cookies to communicate directly with the PSE&G MySmartEnergy portal (MyMeter platform).
+Uses session cookies to communicate directly with a PSEG MySmartEnergy portal (MyMeter platform).
 """
 
 from __future__ import annotations
@@ -17,15 +17,14 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from .const import DEFAULT_ELECTRIC_RATE
+from .const import DEFAULT_ELECTRIC_RATE, DEFAULT_PORTAL_URL
 
 _LOGGER = logging.getLogger(__name__)
 
-BASE_URL = "https://mysmartenergy.nj.pseg.com"
 # Requested by the keep-alive between scheduled updates: the dashboard's widget
 # loader with an empty region, about 100 bytes, instead of the whole dashboard page
 KEEPALIVE_PATH = "/Widget/LoadWidgets"
-# The portal's local time zone; MyMeter timestamps are wall-clock times in it.
+# The portals' local time zone (NJ and Long Island); MyMeter timestamps are wall-clock times in it.
 PORTAL_TIMEZONE = ZoneInfo("America/New_York")
 
 
@@ -86,7 +85,13 @@ class PsegConnectionError(Exception):
 class PsegClient:
     """Client for PSE&G MySmartEnergy."""
 
-    def __init__(self, cookie: str, user_configured_rate: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        cookie: str,
+        user_configured_rate: Optional[float] = None,
+        portal_url: str = DEFAULT_PORTAL_URL,
+    ) -> None:
+        self.base_url = portal_url.rstrip("/")
         self.cookie = cookie
         try:
             self.user_configured_rate = float(user_configured_rate) if user_configured_rate and float(user_configured_rate) > 0 else None
@@ -105,7 +110,7 @@ class PsegClient:
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": f"{BASE_URL}/Dashboard",
+            "Referer": f"{self.base_url}/Dashboard",
         })
         self.update_cookie(cookie)
 
@@ -119,7 +124,7 @@ class PsegClient:
         """
         self.cookie = new_cookie
         self.session.cookies.clear()
-        host = urlparse(BASE_URL).hostname
+        host = urlparse(self.base_url).hostname
         for part in new_cookie.split(";"):
             name, separator, value = part.strip().partition("=")
             if separator and name:
@@ -153,7 +158,7 @@ class PsegClient:
     def test_connection(self, timeout: float = 20) -> bool:
         """Validate whether current session cookie is authorized."""
         try:
-            resp = self.session.get(f"{BASE_URL}/Dashboard", allow_redirects=True, timeout=timeout)
+            resp = self.session.get(f"{self.base_url}/Dashboard", allow_redirects=True, timeout=timeout)
             if resp.status_code in (401, 403):
                 raise PsegAuthError(f"HTTP status {resp.status_code} received from portal")
             if resp.status_code != 200:
@@ -175,7 +180,7 @@ class PsegClient:
         """
         try:
             resp = self.session.get(
-                f"{BASE_URL}{KEEPALIVE_PATH}",
+                f"{self.base_url}{KEEPALIVE_PATH}",
                 params={"Region": "", "_": int(time.time() * 1000)},
                 headers={"X-Requested-With": "XMLHttpRequest"},
                 allow_redirects=False,
@@ -203,7 +208,7 @@ class PsegClient:
     def _get_verification_token(self) -> str:
         """Extract __RequestVerificationToken from the /Dashboard page."""
         try:
-            resp = self.session.get(f"{BASE_URL}/Dashboard", timeout=25)
+            resp = self.session.get(f"{self.base_url}/Dashboard", timeout=25)
             if resp.status_code in (401, 403):
                 raise PsegAuthError(f"HTTP status {resp.status_code} received from portal")
             if resp.status_code != 200:
@@ -244,7 +249,7 @@ class PsegClient:
         headers2 = {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-Requested-With": "XMLHttpRequest",
-            "Origin": BASE_URL,
+            "Origin": self.base_url,
         }
 
         records_map: dict[str, dict[str, Any]] = {}
@@ -275,7 +280,7 @@ class PsegClient:
 
             try:
                 resp2 = self.session.post(
-                    f"{BASE_URL}/Dashboard/Chart",
+                    f"{self.base_url}/Dashboard/Chart",
                     data=chart_setup_data_kwh,
                     headers=headers2,
                     timeout=25,
@@ -284,7 +289,7 @@ class PsegClient:
 
                 ts = int(time.time() * 1000)
                 resp3 = self.session.get(
-                    f"{BASE_URL}/Dashboard/ChartData",
+                    f"{self.base_url}/Dashboard/ChartData",
                     params={"_": ts},
                     headers=headers2,
                     timeout=25,
@@ -379,19 +384,19 @@ class PsegClient:
         headers2 = {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-Requested-With": "XMLHttpRequest",
-            "Origin": BASE_URL,
+            "Origin": self.base_url,
         }
 
         # Step 2: Query kWh consumption data
         try:
-            resp2 = self.session.post(f"{BASE_URL}/Dashboard/Chart", data=chart_setup_data_kwh, headers=headers2, timeout=25)
+            resp2 = self.session.post(f"{self.base_url}/Dashboard/Chart", data=chart_setup_data_kwh, headers=headers2, timeout=25)
             resp2.raise_for_status()
         except requests.RequestException as err:
             raise PsegConnectionError(f"Failed to set chart context: {err}") from err
 
         ts = int(time.time() * 1000)
         try:
-            resp3 = self.session.get(f"{BASE_URL}/Dashboard/ChartData", params={"_": ts}, headers=headers2, timeout=25)
+            resp3 = self.session.get(f"{self.base_url}/Dashboard/ChartData", params={"_": ts}, headers=headers2, timeout=25)
             resp3.raise_for_status()
             kwh_data = resp3.json()
         except requests.RequestException as err:
