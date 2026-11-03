@@ -109,6 +109,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self._last_reauth_attempt: Optional[datetime] = None
         self._reauth_failure_count: int = 0
         self._reauth_lock = asyncio.Lock()
+        # MyMeter keeps the chart range and interval in the session between the
+        # POST /Dashboard/Chart setup and the GET /Dashboard/ChartData read, so only
+        # one fetch (and its statistics import) may use the session at a time
+        self._portal_lock = asyncio.Lock()
 
         # Resolve optional user-configured rate override (None enables auto-derived 7-day average)
         user_rate = None
@@ -350,26 +354,41 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         # Re-authentication is already pending; pinging a dead session would only repeat it
         if self.auth_required or not self.client.cookie:
             return True
-        try:
-            await self.hass.async_add_executor_job(self.client.keep_alive, timeout)
-        except PsegConnectionError as err:
-            _LOGGER.debug("Keep-alive: PSE&G portal not reachable: %s", err)
-            return False
-        except PsegAuthError as err:
-            if self.hass.is_stopping:
-                return True
-            # No more pings until the session is renewed; the regular update path
-            # re-authenticates via the add-on or asks the user to
-            self.auth_required = True
-            _LOGGER.info("Keep-alive: MyMeter session expired (%s), refreshing", err)
-            await self.async_request_refresh()
+        # An update or backfill is talking to the portal, which keeps the session alive
+        # on its own; waiting would only queue pings behind a long backfill
+        if self._portal_lock.locked():
+            _LOGGER.debug("Keep-alive: skipped, the PSE&G portal is already in use")
             return True
-        self._store_renewed_cookie()
-        _LOGGER.debug("Keep-alive: MyMeter session still valid")
+        expired: PsegAuthError | None = None
+        async with self._portal_lock:
+            try:
+                await self.hass.async_add_executor_job(self.client.keep_alive, timeout)
+            except PsegConnectionError as err:
+                _LOGGER.debug("Keep-alive: PSE&G portal not reachable: %s", err)
+                return False
+            except PsegAuthError as err:
+                if self.hass.is_stopping:
+                    return True
+                # No more pings until the session is renewed; the regular update path
+                # re-authenticates via the add-on or asks the user to
+                self.auth_required = True
+                expired = err
+            else:
+                self._store_renewed_cookie()
+                _LOGGER.debug("Keep-alive: MyMeter session still valid")
+        if expired is not None:
+            # Outside the lock: the refresh can run right away and takes the lock itself
+            _LOGGER.info("Keep-alive: MyMeter session expired (%s), refreshing", expired)
+            await self.async_request_refresh()
         return True
 
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from PSE&G."""
+        async with self._portal_lock:
+            return await self._async_fetch_and_record()
+
+    async def _async_fetch_and_record(self) -> Dict[str, Any]:
+        """Fetch the latest data and record statistics; the caller holds the portal lock."""
         try:
             data = await self.hass.async_add_executor_job(
                 self.client.fetch_energy_data, 14
@@ -635,6 +654,15 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         end_date: str | None = None,
     ) -> int:
         """Fetch and import historical data into Long-Term Statistics."""
+        async with self._portal_lock:
+            return await self._async_backfill_history(start_date, end_date)
+
+    async def _async_backfill_history(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> int:
+        """Run the backfill; the caller holds the portal lock."""
         now = dt_util.now()
         if not end_date:
             end_date_str = now.strftime("%Y-%m-%d")
