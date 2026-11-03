@@ -25,6 +25,7 @@ from custom_components.pseg.const import (
     CONF_KEEP_ALIVE,
     CONF_PASSWORD,
     CONF_USERNAME,
+    DEFAULT_PORTAL_URL,
     KEEPALIVE_MAX_SECONDS,
     KEEPALIVE_MIN_SECONDS,
     KEEPALIVE_RETRY_SECONDS,
@@ -35,7 +36,6 @@ from custom_components.pseg.coordinator import (
     next_keep_alive_delay,
 )
 from custom_components.pseg.pseg_client import (
-    BASE_URL,
     KEEPALIVE_PATH,
     PsegAuthError,
     PsegClient,
@@ -47,7 +47,7 @@ HOST = "mysmartenergy.nj.pseg.com"
 
 
 def response(
-    status: int, url: str = f"{BASE_URL}/Dashboard", location: str = "", json_body=None
+    status: int, url: str = f"{DEFAULT_PORTAL_URL}/Dashboard", location: str = "", json_body=None
 ) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status
@@ -100,18 +100,18 @@ class TestIsLoginUrl(unittest.TestCase):
     """MyMeter sends an expired session to the portal root, where the sign-in form is."""
 
     def test_portal_root(self):
-        self.assertTrue(is_login_url(f"{BASE_URL}/"))
-        self.assertTrue(is_login_url(f"{BASE_URL}/?%3fServiceType%3d1"))
+        self.assertTrue(is_login_url(f"{DEFAULT_PORTAL_URL}/"))
+        self.assertTrue(is_login_url(f"{DEFAULT_PORTAL_URL}/?%3fServiceType%3d1"))
         self.assertTrue(is_login_url("/"))
 
     def test_login_paths(self):
-        self.assertTrue(is_login_url(f"{BASE_URL}/Account/Login"))
+        self.assertTrue(is_login_url(f"{DEFAULT_PORTAL_URL}/Account/Login"))
         self.assertTrue(is_login_url("https://example.okta.com/signin"))
         self.assertTrue(is_login_url("https://login.example.com/authorize"))
 
     def test_dashboard(self):
-        self.assertFalse(is_login_url(f"{BASE_URL}/Dashboard"))
-        self.assertFalse(is_login_url(f"{BASE_URL}/Dashboard/ChartData?_=1"))
+        self.assertFalse(is_login_url(f"{DEFAULT_PORTAL_URL}/Dashboard"))
+        self.assertFalse(is_login_url(f"{DEFAULT_PORTAL_URL}/Dashboard/ChartData?_=1"))
 
 
 class TestClientKeepAlive(unittest.TestCase):
@@ -124,7 +124,7 @@ class TestClientKeepAlive(unittest.TestCase):
         with patch.object(self.client.session, "get", return_value=response(200)) as get:
             self.client.keep_alive()
         get.assert_called_once()
-        self.assertEqual(get.call_args.args[0], f"{BASE_URL}{KEEPALIVE_PATH}")
+        self.assertEqual(get.call_args.args[0], f"{DEFAULT_PORTAL_URL}{KEEPALIVE_PATH}")
         # The sign-in page an expired session is redirected to is not downloaded
         self.assertFalse(get.call_args.kwargs["allow_redirects"])
 
@@ -167,7 +167,7 @@ class TestClientKeepAlive(unittest.TestCase):
                 self.client.keep_alive()
 
     def test_other_redirect_is_not_expired(self):
-        moved = response(302, location=f"{BASE_URL}/Maintenance")
+        moved = response(302, location=f"{DEFAULT_PORTAL_URL}/Maintenance")
         with patch.object(self.client.session, "get", return_value=moved):
             with self.assertRaises(PsegConnectionError):
                 self.client.keep_alive()
@@ -188,7 +188,7 @@ class TestConnectionExpiry(unittest.TestCase):
 
     def test_redirected_to_portal_root(self):
         client = PsegClient(cookie="MM_SID=abc")
-        with patch.object(client.session, "get", return_value=response(200, url=f"{BASE_URL}/")):
+        with patch.object(client.session, "get", return_value=response(200, url=f"{DEFAULT_PORTAL_URL}/")):
             with self.assertRaises(PsegAuthError):
                 client.test_connection()
 

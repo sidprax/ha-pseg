@@ -7,7 +7,12 @@ import ipaddress
 from typing import Any
 import urllib.parse
 
-from .const import CONF_AUTH_SERVER_URL, DEFAULT_AUTH_SERVER_URL
+from .const import (
+    CONF_AUTH_SERVER_URL,
+    CONF_PORTAL_URL,
+    DEFAULT_AUTH_SERVER_URL,
+    DEFAULT_PORTAL_URL,
+)
 
 LOCAL_HOST_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal")
 TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
@@ -64,6 +69,11 @@ def get_valid_auth_server_url(
         if data_url and is_valid_auth_server_url(data_url):
             return str(data_url).strip()
     return default
+
+
+def get_portal_url(data: dict[str, Any] | None) -> str:
+    """Return the entry's MyMeter portal; entries from before portal selection are NJ."""
+    return (data or {}).get(CONF_PORTAL_URL) or DEFAULT_PORTAL_URL
 
 
 def is_valid_auth_server_url(url: str | None) -> bool:

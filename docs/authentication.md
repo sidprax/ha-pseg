@@ -117,6 +117,16 @@ Uses a temporary session cookie copied from an active primary account browser se
 
 ---
 
+## PSEG Long Island (Experimental)
+
+PSEG Long Island runs its own MyMeter portal ([mysmartenergy.psegliny.com](https://mysmartenergy.psegliny.com/)). Choose **PSEG Long Island (experimental)** as the portal when adding the integration.
+
+- **Browser cookie only**: Sign in to the Long Island portal in your browser and paste the `Cookie:` header, the same way as Option 1. Okta sign-in is PSE&G New Jersey only, and the companion add-on signs in to the New Jersey portal only for now.
+- **Experimental**: Not yet tested with a Long Island account. If you try it, please report how it went in an issue, ideally with a diagnostics download.
+- **Session Keep-Alive** is on by default, as for every pasted cookie.
+
+---
+
 ## Session Keep-Alive
 
 MyMeter ends a session after several minutes (measured between 6 to 8 minutes) without requests, while the integration only fetches new data every 4 hours. To keep a pasted cookie (Options 1 and 4) working between updates, the integration sends one small request to MyMeter every 4 to 5 minutes, plus one when Home Assistant shuts down.

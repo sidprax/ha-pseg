@@ -23,7 +23,7 @@ from .coordinator import (
     next_keep_alive_delay,
 )
 from .pseg_client import PsegClient
-from .util import is_valid_date_str
+from .util import get_portal_url, is_valid_date_str
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     cookie = entry.data.get(CONF_COOKIE, "")
-    client = PsegClient(cookie)
+    client = PsegClient(cookie, portal_url=get_portal_url(entry.data))
     coordinator = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
