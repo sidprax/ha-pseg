@@ -82,6 +82,37 @@ class PsegConnectionError(Exception):
     """Exception raised for network or communication failures with PSE&G."""
 
 
+def select_meter_series(series_list: list[dict[str, Any]]) -> dict[str, Any]:
+    """Select the meter series containing valid usage readings.
+
+    Accounts with more than one meter expose one "Meter #..." series per meter,
+    and only the meter that has data contains readings. Fall back to the old
+    name match for portals that call the series "PSE&G Electric Meter" or "Meter".
+    """
+    meters = [
+        series
+        for series in series_list
+        if isinstance(series, dict)
+        and str(series.get("name") or "").startswith("Meter #")
+    ]
+
+    for meter in meters:
+        readings = meter.get("data") or []
+        if any(
+            isinstance(point, dict) and point_value(point) is not None
+            for point in readings
+        ):
+            _LOGGER.info("Selected PSE&G meter: %s", meter.get("name"))
+            return meter
+
+    for series in series_list:
+        if isinstance(series, dict) and "Meter" in str(series.get("name") or ""):
+            return series
+
+    _LOGGER.warning("No PSE&G meter series contains valid usage readings")
+    return {}
+
+
 class PsegClient:
     """Client for PSE&G MySmartEnergy."""
 
@@ -310,11 +341,7 @@ class PsegClient:
                 _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
             else:
                 series_list = chart_data.get("series", [])
-                meter_series = {}
-                for s in series_list:
-                    if "Meter" in str(s.get("name") or ""):
-                        meter_series = s
-                        break
+                meter_series = select_meter_series(series_list)
 
                 pts = meter_series.get("data", [])
                 for pt in pts:
@@ -421,14 +448,11 @@ class PsegClient:
             raise PsegConnectionError("No series data returned from MyMeter. Unexpected portal response.")
 
         nav_series = series_list[0].get("data", [])
-        meter_series = {}
+        meter_series = select_meter_series(series_list)
         temp_series = {}
 
         for s in series_list:
-            name = str(s.get("name") or "")
-            if "Meter" in name:
-                meter_series = s
-            elif "Temperature" in name:
+            if "Temperature" in str(s.get("name") or ""):
                 temp_series = s
 
         meter_name = meter_series.get("name") or "PSE&G Electric Meter"
