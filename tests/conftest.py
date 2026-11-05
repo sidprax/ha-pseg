@@ -37,6 +37,7 @@ for mod in [
     "homeassistant.helpers.event",
     "homeassistant.helpers.issue_registry",
     "homeassistant.helpers.typing",
+    "homeassistant.helpers.start",
     "homeassistant.helpers.update_coordinator",
     "homeassistant.util",
     "homeassistant.util.dt",

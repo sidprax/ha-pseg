@@ -17,7 +17,14 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from .const import DEFAULT_ELECTRIC_RATE, DEFAULT_PORTAL_URL
+from . import const
+from .const import DEFAULT_ELECTRIC_RATE
+
+# Released 1.1.2 installations predate the optional portal selection constants
+# and may import BASE_URL from this module. Keep their configuration flow
+# compatible when applying this focused ingestion patch.
+DEFAULT_PORTAL_URL = getattr(const, "DEFAULT_PORTAL_URL", "https://mysmartenergy.nj.pseg.com")
+BASE_URL = DEFAULT_PORTAL_URL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,10 +46,15 @@ def portal_time_to_utc(x_ms: float, fold: int = 0) -> datetime:
     `fold=1` selects the second occurrence of a wall-clock time that repeats
     when the clocks go back (both 1 AM hours carry the same x).
     """
+    if isinstance(x_ms, bool) or not isinstance(x_ms, (int, float)) or not math.isfinite(x_ms):
+        raise ValueError("Invalid portal timestamp")
     wall_clock = datetime.fromtimestamp(x_ms / 1000, tz=timezone.utc).replace(
         tzinfo=PORTAL_TIMEZONE, fold=fold
     )
-    return wall_clock.astimezone(timezone.utc)
+    result = wall_clock.astimezone(timezone.utc)
+    if result.astimezone(PORTAL_TIMEZONE).replace(tzinfo=None) != wall_clock.replace(tzinfo=None):
+        raise ValueError("Portal timestamp falls in the spring DST gap")
+    return result
 
 
 def point_value(pt: Dict[str, Any]) -> Optional[float]:
@@ -235,8 +247,6 @@ class PsegClient:
         chunk_days: int = 90,
     ) -> list[dict[str, Any]]:
         """Fetch historical usage and cost data across a date range in polite chunks."""
-        token = self._get_verification_token()
-
         try:
             start_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
             end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
@@ -245,6 +255,9 @@ class PsegClient:
 
         if start_dt > end_dt:
             start_dt, end_dt = end_dt, start_dt
+        if isinstance(chunk_days, bool) or not isinstance(chunk_days, int) or chunk_days < 1:
+            raise ValueError("chunk_days must be a positive integer")
+        token = self._get_verification_token()
 
         headers2 = {
             "Content-Type": "application/x-www-form-urlencoded",
@@ -252,11 +265,11 @@ class PsegClient:
             "Origin": self.base_url,
         }
 
-        records_map: dict[str, dict[str, Any]] = {}
+        records_map: dict[tuple[str, str], dict[str, Any]] = {}
         curr_start = start_dt
 
         while curr_start <= end_dt:
-            curr_end = min(curr_start + timedelta(days=chunk_days), end_dt)
+            curr_end = min(curr_start + timedelta(days=chunk_days - 1), end_dt)
             chunk_start_str = curr_start.strftime("%Y-%m-%d")
             chunk_end_str = curr_end.strftime("%Y-%m-%d")
             _LOGGER.info("Fetching PSE&G history chunk from %s to %s...", chunk_start_str, chunk_end_str)
@@ -310,14 +323,15 @@ class PsegClient:
                 _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
             else:
                 series_list = chart_data.get("series", [])
-                meter_series = {}
-                for s in series_list:
-                    if "Meter" in str(s.get("name") or ""):
-                        meter_series = s
-                        break
-
-                pts = meter_series.get("data", [])
-                for pt in pts:
+                # A replacement/retired meter can remain in the response with
+                # no data. Retain every meter, deduplicating each meter/day.
+                pts = [
+                    (str(series["name"]), point)
+                    for series in series_list
+                    if "Meter" in str(series.get("name") or "")
+                    for point in series.get("data", [])
+                ]
+                for meter_key, pt in pts:
                     if isinstance(pt, dict):
                         value = point_value(pt)
                         if value is None:
@@ -331,11 +345,19 @@ class PsegClient:
                         except Exception:
                             date_iso = p_start
 
-                        x = pt.get("x", 0)
-                        start_utc = portal_time_to_utc(x) if x else None
+                        x = pt.get("x")
+                        try:
+                            start_utc = portal_time_to_utc(x) if x is not None else None
+                            if start_utc is not None:
+                                date_iso = start_utc.astimezone(PORTAL_TIMEZONE).strftime("%Y-%m-%d")
+                            day = datetime.strptime(date_iso, "%Y-%m-%d")
+                        except (ValueError, TypeError, OverflowError, OSError):
+                            continue
+                        if not start_dt <= day <= end_dt:
+                            continue
                         cost_val = round(kwh * self.effective_rate, 4)
 
-                        records_map[date_iso] = {
+                        records_map[(meter_key, date_iso)] = {
                             "date": date_iso,
                             "start": start_utc,
                             "kwh": kwh,
@@ -346,7 +368,14 @@ class PsegClient:
             if curr_start <= end_dt:
                 time.sleep(0.75)
 
-        sorted_records = [records_map[d] for d in sorted(records_map.keys())]
+        by_day: dict[str, dict[str, Any]] = {}
+        for record in records_map.values():
+            day = record["date"]
+            if day not in by_day:
+                by_day[day] = {**record, "kwh": 0.0, "cost": 0.0}
+            by_day[day]["kwh"] = round(by_day[day]["kwh"] + record["kwh"], 4)
+            by_day[day]["cost"] = round(by_day[day]["cost"] + record["cost"], 4)
+        sorted_records = [by_day[day] for day in sorted(by_day)]
         _LOGGER.info(
             "Fetched %d historical records across range %s to %s",
             len(sorted_records),
@@ -359,7 +388,7 @@ class PsegClient:
         """Fetch usage and temperature data using the 3-step MyMeter chart sequence."""
         token = self._get_verification_token()
 
-        end_dt = datetime.now()
+        end_dt = datetime.now(PORTAL_TIMEZONE)
         start_dt = end_dt - timedelta(days=days_back)
         start_str = start_dt.strftime("%Y-%m-%d")
         end_str = end_dt.strftime("%Y-%m-%d")
@@ -421,50 +450,67 @@ class PsegClient:
             raise PsegConnectionError("No series data returned from MyMeter. Unexpected portal response.")
 
         nav_series = series_list[0].get("data", [])
-        meter_series = {}
-        temp_series = {}
-
-        for s in series_list:
-            name = str(s.get("name") or "")
-            if "Meter" in name:
-                meter_series = s
-            elif "Temperature" in name:
-                temp_series = s
-
-        meter_name = meter_series.get("name") or "PSE&G Electric Meter"
-        detailed_pts = meter_series.get("data", [])
+        meter_series = [series for series in series_list if "Meter" in str(series.get("name") or "")]
+        temp_series = next((series for series in series_list if "Temperature" in str(series.get("name") or "")), {})
+        meter_name = str(meter_series[-1]["name"]) if meter_series else "PSE&G Electric Meter"
+        detailed_pts = [
+            (str(series["name"]), point)
+            for series in meter_series for point in series.get("data", [])
+        ]
         temp_pts = temp_series.get("data", [])
 
         # Parse kWh data points and aggregate daily totals
         daily_kwh_map: dict[str, float] = {}
-        parsed_pts = []
-        prev_x = None
-        for pt in detailed_pts:
+        parsed_map = {}
+        occurrences: dict[tuple[str, float], int] = {}
+        rejected = {"unsupported_point": 0, "invalid_timestamp": 0, "missing_value": 0}
+        for meter_key, pt in detailed_pts:
             if isinstance(pt, dict):
-                x = pt.get("x", 0)
-                # A repeated timestamp is the second 1 AM hour of the night
-                # the clocks go back.
-                start_utc = portal_time_to_utc(x, fold=1 if x == prev_x else 0)
-                prev_x = x
+                x = pt.get("x")
+                try:
+                    first = portal_time_to_utc(x)
+                    second = portal_time_to_utc(x, fold=1)
+                    occurrence = occurrences.get((meter_key, x), 0)
+                    occurrences[(meter_key, x)] = occurrence + 1
+                    # Only an ambiguous fall-back hour can represent two readings.
+                    # Count missing readings too, so the second fold stays distinct.
+                    if first != second and occurrence > 1:
+                        continue
+                    start_utc = second if first != second and occurrence else first
+                except (ValueError, TypeError, OverflowError, OSError):
+                    rejected["invalid_timestamp"] += 1
+                    continue
                 value = point_value(pt)
                 if value is None:
+                    rejected["missing_value"] += 1
                     continue
                 kwh = round(value, 4)
 
-                hs = pt.get("hs", {})
-                start_str = hs.get("start", "")
-                try:
-                    date_iso = datetime.strptime(start_str, "%m/%d/%Y").strftime("%Y-%m-%d")
-                except Exception:
-                    date_iso = start_utc.astimezone(PORTAL_TIMEZONE).strftime("%Y-%m-%d")
-
-                daily_kwh_map[date_iso] = round(daily_kwh_map.get(date_iso, 0.0) + kwh, 4)
-                parsed_pts.append({
+                date_iso = start_utc.astimezone(PORTAL_TIMEZONE).strftime("%Y-%m-%d")
+                parsed_map[(meter_key, start_utc)] = {
+                    "meter": meter_key,
                     "start": start_utc,
                     "date": date_iso,
                     "kwh": kwh,
                     "x": x,
-                })
+                }
+            else:
+                rejected["unsupported_point"] += 1
+
+        # Different physical meters can supply disjoint replacement history or
+        # simultaneous usage. Sum them by hour, but never count a repeated
+        # observation of the same meter/hour twice.
+        by_hour = {}
+        for (_, start), point in parsed_map.items():
+            if start not in by_hour:
+                by_hour[start] = {**point, "kwh": 0.0}
+            by_hour[start]["kwh"] = round(by_hour[start]["kwh"] + point["kwh"], 4)
+        parsed_pts = [by_hour[start] for start in sorted(by_hour)]
+        if parsed_map:
+            meter_name = max(parsed_map.values(), key=lambda point: point["start"])["meter"]
+        for point in parsed_pts:
+            day = point["date"]
+            daily_kwh_map[day] = round(daily_kwh_map.get(day, 0.0) + point["kwh"], 4)
 
         sorted_dates = sorted(daily_kwh_map.keys())
 
@@ -512,8 +558,9 @@ class PsegClient:
                 "is_exact_cost": False,
             })
 
-        latest_record = history_14d[-1] if history_14d else {"date": "None", "kwh": 0.0, "cost": 0.0, "is_exact_cost": False}
-        prev_record = history_14d[-2] if len(history_14d) > 1 else {"date": "None", "kwh": 0.0, "cost": 0.0, "is_exact_cost": False}
+        missing_record = {"date": None, "kwh": None, "cost": None, "is_exact_cost": False}
+        latest_record = history_14d[-1] if history_14d else missing_record
+        prev_record = history_14d[-2] if len(history_14d) > 1 else missing_record
 
         latest_temp = temp_pts[-1] if temp_pts else {}
         temp_range = latest_temp.get("tr", "")
@@ -531,6 +578,15 @@ class PsegClient:
             "previous_cost": prev_record["cost"],
             "history_14d": history_14d,
             "hourly_records": hourly_records,
+            "consumption_data_available": bool(hourly_records),
+            "chart_diagnostics": {
+                "series_count": len(series_list),
+                "meter_series_count": len(meter_series),
+                "meters_with_readings": len({name for name, _ in parsed_map}),
+                "meter_point_count": len(detailed_pts),
+                "parsed_hour_count": len(hourly_records),
+                **rejected,
+            },
             "temperature_range": temp_range,
             "temperature_avg": round(temp_value, 1) if temp_value is not None else None,
             "total_records": len(nav_series),

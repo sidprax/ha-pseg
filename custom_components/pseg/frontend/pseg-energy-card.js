@@ -200,6 +200,18 @@ class PsegEnergyCard extends HTMLElement {
 
       // Each card caches its own entity, so an unavailable account can't show another's data
       const cacheKey = `${SHARED_CACHE_KEY}:${this.config.entity}`;
+      const liveConnectionEnt = this.config.connection_status_entity || this._accountEntity("connection_status");
+      const liveConnectionStatus = liveConnectionEnt ? this._hass.states[liveConnectionEnt]?.state : undefined;
+      if (entity?.attributes?.consumption_data_available === false &&
+          entity.attributes.auth_required !== true && liveConnectionStatus !== "auth_required") {
+        this.shadowRoot.innerHTML = `
+          <ha-card style="padding: 20px;">
+            <strong>PSE&amp;G Energy</strong>
+            <p>No hourly consumption data received.</p>
+            <p>The portal responded, but no usage readings could be imported. Check the integration diagnostics.</p>
+          </ha-card>`;
+        return;
+      }
       try {
         localStorage.removeItem(SHARED_CACHE_KEY);
       } catch (_) {}
@@ -253,6 +265,7 @@ class PsegEnergyCard extends HTMLElement {
       const isAuthRequired = isUnavailable ||
                             entity.attributes.auth_required === true ||
                             connectionStatus === "auth_required";
+
 
     const toggleEnt = this.config.toggle_entity || "input_boolean.pseg_display_dollars";
     const isDollars = this._hass.states[toggleEnt]?.state === "on";

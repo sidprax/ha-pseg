@@ -114,6 +114,8 @@ async def async_get_config_entry_diagnostics(
         "auth_required": coordinator.auth_required,
         "last_update_success": getattr(coordinator, "last_update_success", None),
         "last_successful_update": coordinator.last_successful_update,
+        "statistics_import_status": getattr(coordinator, "statistics_import_status", None),
+        "last_statistics_error": getattr(coordinator, "last_statistics_error", None),
         "next_update_time": next_update.isoformat() if next_update else None,
         "effective_rate": coordinator.effective_rate,
         "rate_source": coordinator.rate_source,

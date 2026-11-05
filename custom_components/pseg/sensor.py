@@ -171,6 +171,8 @@ class PsegConnectionStatusSensor(PsegBaseSensor):
         return {
             "auth_required": self.coordinator.auth_required,
             "last_successful_update": self.coordinator.last_successful_update,
+            "statistics_import_status": self.coordinator.statistics_import_status,
+            "last_statistics_error": self.coordinator.last_statistics_error,
         }
 
 
@@ -220,6 +222,9 @@ class PsegElectricityConsumptionSensor(PsegBaseSensor):
                 ATTR_RATE_7D_AVG: self.coordinator.rate_7d_avg,
                 ATTR_DAYS_USED_FOR_RATE: self.coordinator.days_used_for_rate,
                 ATTR_HISTORY_14D: self._data.get("history_14d", []),
+                "consumption_data_available": self._data.get("consumption_data_available"),
+                "hourly_record_count": self._data.get("hourly_record_count"),
+                "chart_diagnostics": self._data.get("chart_diagnostics"),
                 "last_updated": self._data.get("last_updated"),
                 "temperature_range": self._data.get("temperature_range"),
                 "next_update": self._data.get("next_update"),
