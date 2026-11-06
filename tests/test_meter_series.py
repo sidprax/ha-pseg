@@ -8,19 +8,9 @@ import pytest
 from custom_components.pseg.pseg_client import PsegClient
 
 
-def test_client_remains_compatible_with_released_portal_constants(monkeypatch):
-    from pathlib import Path
-    from custom_components.pseg import const, pseg_client
-
-    monkeypatch.delattr(const, "DEFAULT_PORTAL_URL", raising=False)
-    namespace = {"__name__": "custom_components.pseg.compat_client",
-                 "__package__": "custom_components.pseg"}
-    exec(compile(Path(pseg_client.__file__).read_text(encoding="utf-8"),
-                 pseg_client.__file__, "exec"), namespace)
-    assert namespace["BASE_URL"] == "https://mysmartenergy.nj.pseg.com"
-    assert namespace["PsegClient"]("test=1").base_url == namespace["BASE_URL"]
-
 X = datetime(2026, 10, 20, tzinfo=timezone.utc).timestamp() * 1000
+HOUR = 3_600_000
+DAY = 24 * HOUR
 
 
 def series(name, data):
@@ -55,39 +45,57 @@ def test_empty_meter_never_hides_a_meter_with_readings(empty_first):
     assert result["chart_diagnostics"]["meter_series_count"] == 2
 
 
-def test_replacement_meter_history_is_retained_and_concurrent_usage_is_added():
-    meters = [series("Meter #OLD", [{"x": X, "y": 1}, {"x": X + 3600000, "y": 2}]),
-              series("Meter #NEW", [{"x": X + 3600000, "y": 3}, {"x": X + 7200000, "y": 4}])]
+@pytest.mark.parametrize("new_name", ["Meter #NEW", "Meter #OLD"])
+def test_hourly_replacement_history_is_retained_around_ambiguous_overlap(new_name, caplog):
+    meters = [series("Meter #OLD", [{"x": X, "y": 1}, {"x": X + HOUR, "y": 2}]),
+              series(new_name, [{"x": X + HOUR, "y": 3}, {"x": X + 2 * HOUR, "y": 4}])]
     result = PsegClient("test=1")._parse_chart_data(response(meters))
-    assert [r["kwh"] for r in result["hourly_records"]] == [1, 5, 4]
-    assert result["latest_kwh"] == 10
-    assert result["meter"] == "Meter #NEW"
+    assert [r["start"].hour for r in result["hourly_records"]] == [4, 6]
+    assert [r["kwh"] for r in result["hourly_records"]] == [1, 4]
+    assert result["meter"] == new_name
+    assert result["chart_diagnostics"]["ambiguous_hour_count"] == 1
+    assert result["chart_diagnostics"]["meters_with_readings"] == 2
+    assert "overlapping PSE&G meter readings" in caplog.text
 
 
-def test_duplicate_series_for_same_meter_are_not_double_counted():
+def test_only_valid_readings_can_make_an_hour_ambiguous():
     meters = [series("Meter #ONE", [{"x": X, "y": 1}]),
-              series("Meter #ONE", [{"x": X, "y": 2}])]
+              series("Meter #TWO", [{"x": X, "y": None}])]
     result = PsegClient("test=1")._parse_chart_data(response(meters))
-    assert result["latest_kwh"] == 2
+    assert result["latest_kwh"] == 1
+    assert result["chart_diagnostics"]["ambiguous_hour_count"] == 0
 
 
-def test_daily_backfill_retains_all_meter_days_and_ignores_empty_meter():
+def test_overlapping_series_alone_do_not_report_consumption():
+    meters = [series("Meter #ONE", [{"x": X, "y": 1}]),
+              series("Meter #TWO", [{"x": X, "y": 2}])]
+    result = PsegClient("test=1")._parse_chart_data(response(meters))
+    assert result["hourly_records"] == []
+    assert result["consumption_data_available"] is False
+    assert result["chart_diagnostics"]["ambiguous_hour_count"] == 1
+
+
+def test_daily_backfill_keeps_unambiguous_days_and_ignores_empty_meter(caplog):
     client = PsegClient("test=1")
     client.session = MagicMock()
     client.session.get.return_value.json.return_value = response([
-        series("Meter #OLD", [{"x": X, "y": 10}]),
-        series("Meter #NEW", [{"x": X, "y": 20}, {"x": X + 86400000, "y": 30}]),
+        series("Meter #OLD", [{"x": X, "y": 10}, {"x": X + DAY, "y": 20}]),
+        series("Meter #NEW", [{"x": X + DAY, "y": 30}, {"x": X + 2 * DAY, "y": 40}]),
         series("Meter #EMPTY", []),
     ])
     with patch.object(client, "_get_verification_token", return_value="token"):
-        records = client.fetch_history_range("2026-10-20", "2026-10-21")
-    assert [r["kwh"] for r in records] == [30, 30]
+        records = client.fetch_history_range("2026-10-20", "2026-10-22")
+    assert [(r["date"], r["kwh"]) for r in records] == [
+        ("2026-10-20", 10), ("2026-10-22", 40)
+    ]
+    assert "overlapping PSE&G meter readings" in caplog.text
 
 
-def test_repeated_fall_back_hours_are_counted_per_meter():
+def test_fall_back_hours_are_assigned_within_each_series():
     repeated = datetime(2026, 11, 1, 1, tzinfo=timezone.utc).timestamp() * 1000
     meters = [series("Meter #ONE", [{"x": repeated, "y": 1}, {"x": repeated, "y": 2}]),
-              series("Meter #TWO", [{"x": repeated, "y": 3}, {"x": repeated, "y": 4}])]
+              series("Meter #ONE", [{"x": repeated, "y": 3}])]
     result = PsegClient("test=1")._parse_chart_data(response(meters))
-    assert [r["start"].hour for r in result["hourly_records"]] == [5, 6]
-    assert [r["kwh"] for r in result["hourly_records"]] == [4, 6]
+    assert [r["start"].hour for r in result["hourly_records"]] == [6]
+    assert [r["kwh"] for r in result["hourly_records"]] == [2]
+    assert result["chart_diagnostics"]["ambiguous_hour_count"] == 1

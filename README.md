@@ -125,7 +125,11 @@ The integration natively publishes official Home Assistant External Statistics f
 
 The Energy Dashboard displays hourly usage and estimated costs for recent days. Costs use the configured/default rate, rather than exact billed amounts.
 
-**Upgrading:** Existing Energy configurations must switch to the new Hourly statistics above. The old unsuffixed statistics are preserved because earlier releases could mix daily backfill totals with hourly readings and reset cumulative sums between chunks. They are not automatically migrated or deleted. See [statistics ingestion](docs/statistics-ingestion.md) for correction handling, startup behavior, and limitations.
+### Upgrade note for existing Energy dashboards
+
+The original PSE&G Energy sources stop updating with this release. If Home Assistant has either legacy statistic ID, the integration shows an upgrade notice in **Settings > System > Repairs**. After the first successful hourly import, edit the existing PSE&G source in **Settings > Dashboards > Energy**. Replace consumption with `pseg:electricity_consumption_hourly` and, if configured, replace cost with `pseg:electricity_cost_hourly`.
+
+The old unsuffixed statistics remain in Recorder as legacy history. Earlier releases could mix hourly readings and daily backfill totals in those series. Choose one source per measurement for any overlapping period to avoid double-counting. See [statistics ingestion](docs/statistics-ingestion.md) for details.
 
 ## Historical Backfill
 

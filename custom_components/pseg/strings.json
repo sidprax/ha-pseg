@@ -142,6 +142,10 @@
     }
   },
   "issues": {
+    "energy_statistics_upgrade": {
+      "title": "Update your PSE&G Energy dashboard sources",
+      "description": "The original PSE&G statistics are preserved as history and no longer update. After the next successful hourly import, open **Settings > Dashboards > Energy**. If you use the original PSE&G sources, replace them with **PSE&G Electricity Consumption (Hourly)** (`pseg:electricity_consumption_hourly`) and, if configured, **PSE&G Electricity Cost (Hourly)** (`pseg:electricity_cost_hourly`). Use one source per measurement for any overlapping period to avoid double-counting."
+    },
     "reauth_required": {
       "title": "PSE&G Authentication Required",
       "description": "Your PSE&G session has expired. Please re-authenticate your account under Settings > Devices & Services > PSE&G > Reconfigure."

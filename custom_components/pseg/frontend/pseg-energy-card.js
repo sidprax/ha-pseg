@@ -266,7 +266,6 @@ class PsegEnergyCard extends HTMLElement {
                             entity.attributes.auth_required === true ||
                             connectionStatus === "auth_required";
 
-
     const toggleEnt = this.config.toggle_entity || "input_boolean.pseg_display_dollars";
     const isDollars = this._hass.states[toggleEnt]?.state === "on";
 

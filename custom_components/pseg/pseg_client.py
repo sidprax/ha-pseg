@@ -5,6 +5,7 @@ Uses session cookies to communicate directly with a PSEG MySmartEnergy portal (M
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import json
 import logging
@@ -17,14 +18,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from . import const
-from .const import DEFAULT_ELECTRIC_RATE
-
-# Released 1.1.2 installations predate the optional portal selection constants
-# and may import BASE_URL from this module. Keep their configuration flow
-# compatible when applying this focused ingestion patch.
-DEFAULT_PORTAL_URL = getattr(const, "DEFAULT_PORTAL_URL", "https://mysmartenergy.nj.pseg.com")
-BASE_URL = DEFAULT_PORTAL_URL
+from .const import DEFAULT_ELECTRIC_RATE, DEFAULT_PORTAL_URL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -74,6 +68,14 @@ def point_value(pt: Dict[str, Any]) -> Optional[float]:
     if not math.isfinite(value):
         return None
     return value
+
+
+def _unambiguous_readings(
+    by_interval: dict[datetime, list[dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep intervals with a valid reading from exactly one series."""
+    readings = [points[0] for _, points in sorted(by_interval.items()) if len(points) == 1]
+    return readings, len(by_interval) - len(readings)
 
 
 def is_login_url(url: str) -> bool:
@@ -265,7 +267,7 @@ class PsegClient:
             "Origin": self.base_url,
         }
 
-        records_map: dict[tuple[str, str], dict[str, Any]] = {}
+        by_day: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
         curr_start = start_dt
 
         while curr_start <= end_dt:
@@ -323,16 +325,13 @@ class PsegClient:
                 _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
             else:
                 series_list = chart_data.get("series", [])
-                # A replacement/retired meter can remain in the response with
-                # no data. Retain every meter, deduplicating each meter/day.
-                pts = [
-                    (str(series["name"]), point)
-                    for series in series_list
-                    if "Meter" in str(series.get("name") or "")
-                    for point in series.get("data", [])
-                ]
-                for meter_key, pt in pts:
-                    if isinstance(pt, dict):
+                for series in series_list:
+                    if "Meter" not in str(series.get("name") or ""):
+                        continue
+                    series_days = {}
+                    for pt in series.get("data") or []:
+                        if not isinstance(pt, dict):
+                            continue
                         value = point_value(pt)
                         if value is None:
                             continue
@@ -353,29 +352,26 @@ class PsegClient:
                             day = datetime.strptime(date_iso, "%Y-%m-%d")
                         except (ValueError, TypeError, OverflowError, OSError):
                             continue
-                        if not start_dt <= day <= end_dt:
+                        if not curr_start <= day <= curr_end:
                             continue
                         cost_val = round(kwh * self.effective_rate, 4)
 
-                        records_map[(meter_key, date_iso)] = {
+                        series_days[day] = {
                             "date": date_iso,
                             "start": start_utc,
                             "kwh": kwh,
                             "cost": cost_val,
                         }
+                    for day, record in series_days.items():
+                        by_day[day].append(record)
 
             curr_start = curr_end + timedelta(days=1)
             if curr_start <= end_dt:
                 time.sleep(0.75)
 
-        by_day: dict[str, dict[str, Any]] = {}
-        for record in records_map.values():
-            day = record["date"]
-            if day not in by_day:
-                by_day[day] = {**record, "kwh": 0.0, "cost": 0.0}
-            by_day[day]["kwh"] = round(by_day[day]["kwh"] + record["kwh"], 4)
-            by_day[day]["cost"] = round(by_day[day]["cost"] + record["cost"], 4)
-        sorted_records = [by_day[day] for day in sorted(by_day)]
+        sorted_records, ambiguous_days = _unambiguous_readings(by_day)
+        if ambiguous_days:
+            _LOGGER.warning("Skipped %d days with overlapping PSE&G meter readings", ambiguous_days)
         _LOGGER.info(
             "Fetched %d historical records across range %s to %s",
             len(sorted_records),
@@ -453,25 +449,29 @@ class PsegClient:
         meter_series = [series for series in series_list if "Meter" in str(series.get("name") or "")]
         temp_series = next((series for series in series_list if "Temperature" in str(series.get("name") or "")), {})
         meter_name = str(meter_series[-1]["name"]) if meter_series else "PSE&G Electric Meter"
-        detailed_pts = [
-            (str(series["name"]), point)
-            for series in meter_series for point in series.get("data", [])
-        ]
         temp_pts = temp_series.get("data", [])
 
         # Parse kWh data points and aggregate daily totals
         daily_kwh_map: dict[str, float] = {}
-        parsed_map = {}
-        occurrences: dict[tuple[str, float], int] = {}
+        by_hour: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
+        meters_with_readings = 0
+        meter_point_count = 0
         rejected = {"unsupported_point": 0, "invalid_timestamp": 0, "missing_value": 0}
-        for meter_key, pt in detailed_pts:
-            if isinstance(pt, dict):
+        for series in meter_series:
+            points = series.get("data") or []
+            meter_point_count += len(points)
+            series_hours = {}
+            occurrences: dict[float, int] = {}
+            for pt in points:
+                if not isinstance(pt, dict):
+                    rejected["unsupported_point"] += 1
+                    continue
                 x = pt.get("x")
                 try:
                     first = portal_time_to_utc(x)
                     second = portal_time_to_utc(x, fold=1)
-                    occurrence = occurrences.get((meter_key, x), 0)
-                    occurrences[(meter_key, x)] = occurrence + 1
+                    occurrence = occurrences.get(x, 0)
+                    occurrences[x] = occurrence + 1
                     # Only an ambiguous fall-back hour can represent two readings.
                     # Count missing readings too, so the second fold stays distinct.
                     if first != second and occurrence > 1:
@@ -487,27 +487,22 @@ class PsegClient:
                 kwh = round(value, 4)
 
                 date_iso = start_utc.astimezone(PORTAL_TIMEZONE).strftime("%Y-%m-%d")
-                parsed_map[(meter_key, start_utc)] = {
-                    "meter": meter_key,
+                series_hours[start_utc] = {
+                    "meter": str(series["name"]),
                     "start": start_utc,
                     "date": date_iso,
                     "kwh": kwh,
-                    "x": x,
                 }
-            else:
-                rejected["unsupported_point"] += 1
+            if series_hours:
+                meters_with_readings += 1
+            for start, point in series_hours.items():
+                by_hour[start].append(point)
 
-        # Different physical meters can supply disjoint replacement history or
-        # simultaneous usage. Sum them by hour, but never count a repeated
-        # observation of the same meter/hour twice.
-        by_hour = {}
-        for (_, start), point in parsed_map.items():
-            if start not in by_hour:
-                by_hour[start] = {**point, "kwh": 0.0}
-            by_hour[start]["kwh"] = round(by_hour[start]["kwh"] + point["kwh"], 4)
-        parsed_pts = [by_hour[start] for start in sorted(by_hour)]
-        if parsed_map:
-            meter_name = max(parsed_map.values(), key=lambda point: point["start"])["meter"]
+        parsed_pts, ambiguous_hours = _unambiguous_readings(by_hour)
+        if ambiguous_hours:
+            _LOGGER.warning("Skipped %d hours with overlapping PSE&G meter readings", ambiguous_hours)
+        if parsed_pts:
+            meter_name = parsed_pts[-1]["meter"]
         for point in parsed_pts:
             day = point["date"]
             daily_kwh_map[day] = round(daily_kwh_map.get(day, 0.0) + point["kwh"], 4)
@@ -582,9 +577,10 @@ class PsegClient:
             "chart_diagnostics": {
                 "series_count": len(series_list),
                 "meter_series_count": len(meter_series),
-                "meters_with_readings": len({name for name, _ in parsed_map}),
-                "meter_point_count": len(detailed_pts),
+                "meters_with_readings": meters_with_readings,
+                "meter_point_count": meter_point_count,
                 "parsed_hour_count": len(hourly_records),
+                "ambiguous_hour_count": ambiguous_hours,
                 **rejected,
             },
             "temperature_range": temp_range,
