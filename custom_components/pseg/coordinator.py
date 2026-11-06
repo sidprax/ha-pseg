@@ -5,23 +5,27 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 import logging
+import math
 import random
 from typing import Any, Dict, Optional
 
 import aiohttp
+from sqlalchemy import select
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.db_schema import Statistics, StatisticsMeta
 from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
-    get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -43,10 +47,52 @@ from .const import (
     KEEPALIVE_MAX_SECONDS,
     KEEPALIVE_MIN_SECONDS,
 )
-from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
+from .pseg_client import PORTAL_TIMEZONE, PsegAuthError, PsegClient, PsegConnectionError
+from .statistics import reconcile_statistics
 from .util import get_valid_auth_server_url, is_valid_auth_server_url, sanitize_url_for_logging
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _read_statistics_window(
+    hass: HomeAssistant, start: datetime, statistic_ids: set[str],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    """Read each series from its predecessor through its latest stored row."""
+    start_ts = start.timestamp()
+    ids_by_start: dict[datetime, set[str]] = {}
+    # Recorder's period API has a lower bound but cannot return a predecessor
+    # across a gap. Look up its timestamp using the (metadata_id, start_ts) index.
+    with get_instance(hass).get_session() as session:
+        for statistic_id in statistic_ids:
+            previous_ts = session.scalar(
+                select(Statistics.start_ts)
+                .join(StatisticsMeta, StatisticsMeta.id == Statistics.metadata_id)
+                .where(StatisticsMeta.statistic_id == statistic_id, Statistics.start_ts < start_ts)
+                .order_by(Statistics.start_ts.desc())
+                .limit(1)
+            )
+            read_start = start if previous_ts is None else datetime.fromtimestamp(previous_ts, tz=dt_util.UTC)
+            ids_by_start.setdefault(read_start, set()).add(statistic_id)
+
+    existing = {}
+    predecessors = {}
+    for read_start, ids in ids_by_start.items():
+        rows_by_id = statistics_during_period(
+            hass, read_start, None, ids, "hour", {"energy": "kWh"}, {"state", "sum"},
+        )
+        for statistic_id in ids:
+            rows = rows_by_id.get(statistic_id, [])
+            if read_start < start:
+                if not rows:
+                    raise ValueError(f"Recorder predecessor missing for {statistic_id}")
+                previous_start = rows[0]["start"]
+                previous_ts = previous_start.timestamp() if isinstance(previous_start, datetime) else previous_start
+                if previous_ts != read_start.timestamp():
+                    raise ValueError(f"Recorder predecessor changed for {statistic_id}")
+                predecessors[statistic_id] = rows[0]
+                rows = rows[1:]
+            existing[statistic_id] = rows
+    return existing, predecessors
 
 
 class ReauthStatus:
@@ -106,6 +152,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self.auth_required: bool = False
         self.status: str = "connected"
         self.last_successful_update: Optional[str] = None
+        self.statistics_import_status = "not_attempted"
+        self._startup_import_scheduled = False
+        self.last_statistics_error: str | None = None
         self._last_reauth_attempt: Optional[datetime] = None
         self._reauth_failure_count: int = 0
         self._reauth_lock = asyncio.Lock()
@@ -113,6 +162,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         # POST /Dashboard/Chart setup and the GET /Dashboard/ChartData read, so only
         # one fetch (and its statistics import) may use the session at a time
         self._portal_lock = asyncio.Lock()
+        self._statistics_lock = asyncio.Lock()
 
         # Resolve optional user-configured rate override (None enables auto-derived 7-day average)
         user_rate = None
@@ -393,12 +443,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             data = await self.hass.async_add_executor_job(
                 self.client.fetch_energy_data, 14
             )
-            records = data.get("hourly_records") or data.get("history_14d")
-            if records:
-                try:
-                    await self.async_record_statistics(records, is_backfill=False)
-                except Exception as stat_err:
-                    _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+            await self._async_import_poll_data(data)
             self.next_update_time = dt_util.utcnow() + self.update_interval
             data["next_update"] = self.next_update_time.isoformat()
             self._last_valid_data = data
@@ -426,12 +471,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 data = await self.hass.async_add_executor_job(
                     self.client.fetch_energy_data, 14
                 )
-                records = data.get("hourly_records") or data.get("history_14d")
-                if records:
-                    try:
-                        await self.async_record_statistics(records, is_backfill=False)
-                    except Exception as stat_err:
-                        _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+                await self._async_import_poll_data(data)
                 self.next_update_time = dt_util.utcnow() + self.update_interval
                 data["next_update"] = self.next_update_time.isoformat()
                 self._last_valid_data = data
@@ -473,16 +513,59 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             self.status = "error"
             raise UpdateFailed(f"Error communicating with PSE&G: {err}") from err
 
+    async def _async_import_poll_data(self, data: dict[str, Any]) -> None:
+        """Report portal data availability separately from Recorder success."""
+        records = data.get("hourly_records") or []
+        data["consumption_data_available"] = bool(records)
+        data["hourly_record_count"] = len(records)
+        self.last_statistics_error = None
+        if not records:
+            self.statistics_import_status = "no_data"
+            _LOGGER.warning(
+                "Portal responded but no hourly consumption was parsed; chart diagnostics: %s",
+                data.get("chart_diagnostics", {}),
+            )
+            return
+        # Recorder processes its queue only after HA has fully started. The
+        # first refresh is part of setup, so waiting here would prevent the
+        # startup event that releases Recorder. is_running includes starting.
+        if not self.hass.is_running or self.hass.state == CoreState.starting:
+            self.statistics_import_status = "pending_startup"
+            if not self._startup_import_scheduled:
+                self._startup_import_scheduled = True
+
+                async def refresh_after_start(hass: HomeAssistant) -> None:
+                    self._startup_import_scheduled = False
+                    await self.async_request_refresh()
+
+                cancel = async_at_started(self.hass, refresh_after_start)
+                if self.config_entry:
+                    self.config_entry.async_on_unload(cancel)
+            return
+        try:
+            await self.async_record_statistics(records)
+        except Exception as err:
+            self.statistics_import_status = "error"
+            self.last_statistics_error = str(err)
+            _LOGGER.warning("Could not record statistics into LTS: %s", err)
+        else:
+            self.statistics_import_status = "synchronized"
+
     async def async_record_statistics(
         self,
         records: list[dict[str, Any]],
         is_backfill: bool = False,
     ) -> None:
-        """Import energy consumption and cost records into Home Assistant external long-term statistics."""
+        """Serialize imports, including direct callers outside the portal lock."""
+        async with self._statistics_lock:
+            await self._async_record_statistics(records, is_backfill)
+
+    async def _async_record_statistics(
+        self, records: list[dict[str, Any]], is_backfill: bool = False,
+    ) -> None:
+        """Reconcile interval readings with committed external statistics."""
         if not records:
             return
-
-        tz = dt_util.get_time_zone(self.hass.config.time_zone)
 
         # Normalize records to UTC start datetime and float values
         normalized_records = []
@@ -490,34 +573,52 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             start_dt = None
             if "start" in r and r["start"]:
                 if isinstance(r["start"], datetime):
+                    if r["start"].tzinfo is None or r["start"].utcoffset() is None:
+                        raise ValueError("Statistics require timezone-aware timestamps")
                     start_dt = dt_util.as_utc(r["start"])
                 elif isinstance(r["start"], (int, float)):
                     start_dt = datetime.fromtimestamp(r["start"], tz=dt_util.UTC)
             elif "date" in r and r["date"]:
-                local_dt = datetime.strptime(r["date"], "%Y-%m-%d").replace(tzinfo=tz)
+                local_dt = datetime.strptime(r["date"], "%Y-%m-%d").replace(tzinfo=PORTAL_TIMEZONE)
                 start_dt = dt_util.as_utc(local_dt)
 
             if not start_dt:
                 continue
 
-            kwh = float(r.get("kwh") or 0.0)
-            cost = float(r.get("cost") or 0.0)
+            if start_dt.tzinfo is None or start_dt.utcoffset() is None:
+                raise ValueError("Statistics require timezone-aware timestamps")
+            if start_dt.minute or start_dt.second or start_dt.microsecond:
+                raise ValueError("Statistics timestamps must be aligned to an hour")
+            if any(isinstance(r.get(key), bool) or r.get(key) is None for key in ("kwh", "cost")):
+                raise ValueError("Statistics require numeric consumption and cost")
+            kwh = float(r["kwh"])
+            cost = float(r["cost"])
+            if not math.isfinite(kwh) or not math.isfinite(cost):
+                raise ValueError("Statistics require finite consumption and cost")
             normalized_records.append({"start": start_dt, "kwh": kwh, "cost": cost})
 
         if not normalized_records:
             return
 
-        sorted_records = sorted(normalized_records, key=lambda x: x["start"])
+        # Retried or overlapping portal records must not be counted twice.
+        by_start = {record["start"]: record for record in normalized_records}
+        sorted_records = [by_start[start] for start in sorted(by_start)]
 
-        consumption_id = f"{DOMAIN}:electricity_consumption"
-        cost_id = f"{DOMAIN}:electricity_cost"
+        # Daily totals do not contain hourly detail. Keep them in alternative
+        # series so a backfill can never overwrite or double-count hourly rows.
+        # Older releases mixed daily totals into the unsuffixed IDs and reset
+        # cumulative sums between backfill chunks. Preserve that legacy history
+        # and use explicit resolution IDs for all verified imports.
+        suffix = "_daily" if is_backfill else "_hourly"
+        consumption_id = f"{DOMAIN}:electricity_consumption{suffix}"
+        cost_id = f"{DOMAIN}:electricity_cost{suffix}"
 
         consumption_meta: StatisticMetaData = {
             "has_mean": False,
             "has_sum": True,
             "mean_type": 0,
             "unit_class": "energy",
-            "name": "PSE&G Electricity Consumption",
+            "name": "PSE&G Electricity Consumption" + (" (Daily History)" if is_backfill else " (Hourly)"),
             "source": DOMAIN,
             "statistic_id": consumption_id,
             "unit_of_measurement": "kWh",
@@ -528,125 +629,70 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             "has_sum": True,
             "mean_type": 0,
             "unit_class": None,
-            "name": "PSE&G Electricity Cost",
+            "name": "PSE&G Electricity Cost" + (" (Daily History)" if is_backfill else " (Hourly)"),
             "source": DOMAIN,
             "statistic_id": cost_id,
             "unit_of_measurement": "USD",
         }
 
-        # Check existing external statistics in Home Assistant
-        last_stat_start_dt: Optional[datetime] = None
-        last_consumption_sum = 0.0
-        last_cost_sum = 0.0
-
+        recorder = get_instance(self.hass)
         try:
-            last_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics,
+            # An earlier queued import must be committed before its values form
+            # the next baseline. Reading in the executor alone is not a barrier.
+            await recorder.async_block_till_done()
+            existing, predecessors = await recorder.async_add_executor_job(
+                _read_statistics_window,
                 self.hass,
-                1,
-                consumption_id,
-                True,
-                {"sum", "start"},
+                sorted_records[0]["start"],
+                {consumption_id, cost_id},
             )
-            if consumption_id in last_stats and last_stats[consumption_id]:
-                last_stat = last_stats[consumption_id][0]
-                stat_start = last_stat.get("start")
-                if isinstance(stat_start, (int, float)):
-                    last_stat_start_dt = datetime.fromtimestamp(stat_start, tz=dt_util.UTC)
-                elif isinstance(stat_start, datetime):
-                    last_stat_start_dt = dt_util.as_utc(stat_start)
-                last_consumption_sum = float(last_stat.get("sum") or 0.0)
+            # Validate and build both streams before queuing either write.
+            consumption_stats = reconcile_statistics(
+                existing.get(consumption_id, []), sorted_records, "kwh",
+                predecessor=predecessors.get(consumption_id),
+            )
+            cost_stats = reconcile_statistics(
+                existing.get(cost_id, []), sorted_records, "cost",
+                predecessor=predecessors.get(cost_id),
+            )
         except Exception as err:
-            _LOGGER.debug("Could not query last consumption statistic: %s", err)
+            raise HomeAssistantError(f"Could not reconcile statistics; import aborted: {err}") from err
 
-        try:
-            last_cost_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics,
+        if consumption_stats:
+            async_add_external_statistics(self.hass, consumption_meta, consumption_stats)
+        if cost_stats:
+            async_add_external_statistics(self.hass, cost_meta, cost_stats)
+        if consumption_stats or cost_stats:
+            await recorder.async_block_till_done()
+            # A queue barrier is not a result from each import task. Verify the
+            # committed suffix before reporting successful synchronization.
+            written = await recorder.async_add_executor_job(
+                statistics_during_period,
                 self.hass,
-                1,
-                cost_id,
-                True,
-                {"sum", "start"},
+                min(row["start"] for row in consumption_stats + cost_stats),
+                None,
+                {consumption_id, cost_id},
+                "hour",
+                {"energy": "kWh"},
+                {"state", "sum"},
             )
-            if cost_id in last_cost_stats and last_cost_stats[cost_id]:
-                last_cost_stat = last_cost_stats[cost_id][0]
-                last_cost_sum = float(last_cost_stat.get("sum") or 0.0)
-        except Exception as err:
-            _LOGGER.debug("Could not query last cost statistic: %s", err)
-
-        consumption_stats: list[StatisticData] = []
-        cost_stats: list[StatisticData] = []
-
-        if is_backfill or last_stat_start_dt is None:
-            # Full backfill or fresh initialization
-            first_start = sorted_records[0]["start"]
-            step = timedelta(hours=1)
-            if len(sorted_records) > 1:
-                diff = sorted_records[1]["start"] - sorted_records[0]["start"]
-                if diff >= timedelta(days=1):
-                    step = timedelta(days=1)
-
-            baseline_dt = first_start - step
-            consumption_stats.append(
-                StatisticData(
-                    start=baseline_dt,
-                    state=0.0,
-                    sum=0.0,
-                )
+            for statistic_id, expected in ((consumption_id, consumption_stats), (cost_id, cost_stats)):
+                actual = {
+                    (row["start"].timestamp() if isinstance(row["start"], datetime) else row["start"]): row
+                    for row in written.get(statistic_id, [])
+                }
+                for row in expected:
+                    stored = actual.get(row["start"].timestamp())
+                    if stored is None or any(
+                        stored.get(key) is None or not math.isclose(
+                            float(stored[key]), row[key], abs_tol=.00001, rel_tol=0,
+                        ) for key in ("state", "sum")
+                    ):
+                        raise HomeAssistantError("Statistics import did not match committed Recorder data")
+            _LOGGER.info(
+                "Reconciled %d consumption and %d cost statistics (%s resolution)",
+                len(consumption_stats), len(cost_stats), "daily" if is_backfill else "hourly",
             )
-            cost_stats.append(
-                StatisticData(
-                    start=baseline_dt,
-                    state=0.0,
-                    sum=0.0,
-                )
-            )
-            running_consumption = 0.0
-            running_cost = 0.0
-            records_to_process = sorted_records
-        else:
-            # Incremental append: strictly process records newer than the latest recorded statistic
-            records_to_process = [r for r in sorted_records if r["start"] > last_stat_start_dt]
-            running_consumption = last_consumption_sum
-            running_cost = last_cost_sum
-
-        if not records_to_process and len(consumption_stats) <= 1:
-            _LOGGER.debug("No new statistics to record (all records <= %s)", last_stat_start_dt)
-            return
-
-        for r in records_to_process:
-            start_utc = r["start"]
-            kwh = r["kwh"]
-            cost = r["cost"]
-
-            running_consumption += kwh
-            running_cost += cost
-
-            consumption_stats.append(
-                StatisticData(
-                    start=start_utc,
-                    state=kwh,
-                    sum=round(running_consumption, 4),
-                )
-            )
-            cost_stats.append(
-                StatisticData(
-                    start=start_utc,
-                    state=cost,
-                    sum=round(running_cost, 4),
-                )
-            )
-
-        async_add_external_statistics(self.hass, consumption_meta, consumption_stats)
-        async_add_external_statistics(self.hass, cost_meta, cost_stats)
-        _LOGGER.info(
-            "Added %d external statistics into LTS for %s and %s (%s to %s)",
-            len(consumption_stats),
-            consumption_id,
-            cost_id,
-            consumption_stats[0]["start"].isoformat(),
-            consumption_stats[-1]["start"].isoformat(),
-        )
 
     async def async_backfill_history(
         self,
@@ -663,7 +709,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         end_date: str | None = None,
     ) -> int:
         """Run the backfill; the caller holds the portal lock."""
-        now = dt_util.now()
+        now = dt_util.utcnow().astimezone(PORTAL_TIMEZONE)
         if not end_date:
             end_date_str = now.strftime("%Y-%m-%d")
         elif hasattr(end_date, "strftime"):
@@ -675,7 +721,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             start_dt = now - timedelta(days=730)
             start_date_str = start_dt.strftime("%Y-%m-%d")
         elif hasattr(start_date, "strftime"):
-            start_date_str = start_dt.strftime("%Y-%m-%d")
+            start_date_str = start_date.strftime("%Y-%m-%d")
         else:
             start_date_str = str(start_date).strip()
 
@@ -736,19 +782,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
         await self.async_record_statistics(records, is_backfill=True)
 
-        # Update coordinator state if backfill includes latest readings
-        latest_record = records[-1]
-        if self._last_valid_data is not None:
-            self._last_valid_data["history_14d"] = records[-14:]
-            self._last_valid_data["latest_date"] = latest_record["date"]
-            self._last_valid_data["latest_kwh"] = latest_record["kwh"]
-            self._last_valid_data["latest_cost"] = latest_record["cost"]
-            if len(records) > 1:
-                prev_record = records[-2]
-                self._last_valid_data["previous_date"] = prev_record["date"]
-                self._last_valid_data["previous_kwh"] = prev_record["kwh"]
-                self._last_valid_data["previous_cost"] = prev_record["cost"]
-            self.async_set_updated_data(self._last_valid_data)
+        # Daily backfill is an alternative view. Do not relabel the latest
+        # hourly poll's sensor model or its availability with daily-only data.
 
         _LOGGER.info("Completed PSE&G backfill: imported %d days of statistics", len(records))
         return len(records)

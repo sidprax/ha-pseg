@@ -119,11 +119,17 @@ The integration natively publishes official Home Assistant External Statistics f
 
 1. In Home Assistant, navigate to **Settings** > **Dashboards** > **Energy**.
 2. Under **Electricity Grid**, click **Add Consumption**.
-3. In the statistic dropdown, select **PSE&G Electricity Consumption** (`pseg:electricity_consumption`).
-4. Select **Track costs for this energy consumption** > **Use an entity with total energy costs** and select **PSE&G Electricity Cost** (`pseg:electricity_cost`).
+3. In the statistic dropdown, select **PSE&G Electricity Consumption (Hourly)** (`pseg:electricity_consumption_hourly`).
+4. Select **Track costs for this energy consumption** > **Use an entity with total energy costs** and select **PSE&G Electricity Cost (Hourly)** (`pseg:electricity_cost_hourly`).
 5. Click **Save**.
 
-The Energy Dashboard will automatically display your electric usage and actual billing costs with hourly resolution for recent days and daily trends across the full backfill range.
+The Energy Dashboard displays hourly usage and estimated costs for recent days. Costs use the configured/default rate, rather than exact billed amounts.
+
+### Upgrade note for existing Energy dashboards
+
+The original PSE&G Energy sources stop updating with this release. If Home Assistant has either legacy statistic ID, the integration shows an upgrade notice in **Settings > System > Repairs**. After the first successful hourly import, edit the existing PSE&G source in **Settings > Dashboards > Energy**. Replace consumption with `pseg:electricity_consumption_hourly` and, if configured, replace cost with `pseg:electricity_cost_hourly`.
+
+The old unsuffixed statistics remain in Recorder as legacy history. Earlier releases could mix hourly readings and daily backfill totals in those series. Choose one source per measurement for any overlapping period to avoid double-counting. See [statistics ingestion](docs/statistics-ingestion.md) for details.
 
 ## Historical Backfill
 
@@ -133,6 +139,8 @@ To backfill historical usage data from the PSE&G portal into Home Assistant Long
 2. Select the `pseg.backfill_history` action.
 3. (Optional) Provide a `start_date` and `end_date` (format: `YYYY-MM-DD`). If omitted, it defaults to backfilling the last 2 years of daily data up to today.
 4. Click **Perform action**.
+
+Backfill requests daily totals and writes the separate **Daily History** statistics (`pseg:electricity_consumption_daily` and `pseg:electricity_cost_daily`). These are an alternative view of usage: do not add daily and hourly sources together for overlapping dates in Energy. Backfill does not overwrite hourly records or change the latest hourly sensor reading.
 
 Example action YAML:
 

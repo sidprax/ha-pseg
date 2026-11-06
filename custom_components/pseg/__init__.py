@@ -12,8 +12,11 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.components.frontend import add_extra_js_url
+from homeassistant.components.recorder.statistics import async_list_statistic_ids
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 
 from .const import CONF_COOKIE, DOMAIN, KEEPALIVE_RETRY_SECONDS
@@ -64,7 +67,29 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             _LOGGER.debug("Could not register static paths: %s", err)
 
     _async_register_backfill_service(hass)
+    async_at_started(hass, _async_check_legacy_statistics)
     return True
+
+
+async def _async_check_legacy_statistics(hass: HomeAssistant) -> None:
+    """Notify users about the Energy source change if legacy statistics exist."""
+    legacy_ids = {f"{DOMAIN}:electricity_consumption", f"{DOMAIN}:electricity_cost"}
+    try:
+        legacy_statistics = await async_list_statistic_ids(hass, legacy_ids)
+    except Exception:
+        _LOGGER.warning("Could not check for legacy PSE&G statistics", exc_info=True)
+        return
+
+    if legacy_statistics:
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            "energy_statistics_upgrade",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="energy_statistics_upgrade",
+            learn_more_url="https://github.com/sidprax/ha-pseg/blob/main/docs/statistics-ingestion.md",
+        )
 
 
 async def _async_handle_backfill_service(hass: HomeAssistant, call: ServiceCall) -> None:

@@ -60,6 +60,18 @@ function render(Card, entity, hass) {
   return card.shadowRoot.innerHTML;
 }
 
+test("an empty consumption response is not displayed as zero or connecting", () => {
+  const { Card } = browser();
+  const hass = { states: {
+    "sensor.pseg_electricity_consumption": {state: "unknown", attributes: {
+      consumption_data_available: false, history_14d: [], auth_required: false,
+    }},
+  }};
+  const html = render(Card, "sensor.pseg_electricity_consumption", hass);
+  assert.match(html, /No hourly consumption data received/);
+  assert.doesNotMatch(html, /Connecting|0\.00/);
+});
+
 // Two accounts, as HA names them: the second account's IDs get a "_2" suffix.
 function twoAccounts({ firstStatus = "connected", secondStatus = "connected" } = {}) {
   return {
