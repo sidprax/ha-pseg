@@ -10,6 +10,7 @@ import random
 from typing import Any, Dict, Optional
 
 import aiohttp
+from sqlalchemy import select
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
@@ -17,6 +18,7 @@ from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.db_schema import Statistics, StatisticsMeta
 from homeassistant.components.recorder.models import StatisticData, StatisticMetaData
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
@@ -50,6 +52,47 @@ from .statistics import reconcile_statistics
 from .util import get_valid_auth_server_url, is_valid_auth_server_url, sanitize_url_for_logging
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _read_statistics_window(
+    hass: HomeAssistant, start: datetime, statistic_ids: set[str],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]]]:
+    """Read each series from its predecessor through its latest stored row."""
+    start_ts = start.timestamp()
+    ids_by_start: dict[datetime, set[str]] = {}
+    # Recorder's period API has a lower bound but cannot return a predecessor
+    # across a gap. Look up its timestamp using the (metadata_id, start_ts) index.
+    with get_instance(hass).get_session() as session:
+        for statistic_id in statistic_ids:
+            previous_ts = session.scalar(
+                select(Statistics.start_ts)
+                .join(StatisticsMeta, StatisticsMeta.id == Statistics.metadata_id)
+                .where(StatisticsMeta.statistic_id == statistic_id, Statistics.start_ts < start_ts)
+                .order_by(Statistics.start_ts.desc())
+                .limit(1)
+            )
+            read_start = start if previous_ts is None else datetime.fromtimestamp(previous_ts, tz=dt_util.UTC)
+            ids_by_start.setdefault(read_start, set()).add(statistic_id)
+
+    existing = {}
+    predecessors = {}
+    for read_start, ids in ids_by_start.items():
+        rows_by_id = statistics_during_period(
+            hass, read_start, None, ids, "hour", {"energy": "kWh"}, {"state", "sum"},
+        )
+        for statistic_id in ids:
+            rows = rows_by_id.get(statistic_id, [])
+            if read_start < start:
+                if not rows:
+                    raise ValueError(f"Recorder predecessor missing for {statistic_id}")
+                previous_start = rows[0]["start"]
+                previous_ts = previous_start.timestamp() if isinstance(previous_start, datetime) else previous_start
+                if previous_ts != read_start.timestamp():
+                    raise ValueError(f"Recorder predecessor changed for {statistic_id}")
+                predecessors[statistic_id] = rows[0]
+                rows = rows[1:]
+            existing[statistic_id] = rows
+    return existing, predecessors
 
 
 class ReauthStatus:
@@ -597,22 +640,20 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             # An earlier queued import must be committed before its values form
             # the next baseline. Reading in the executor alone is not a barrier.
             await recorder.async_block_till_done()
-            existing = await recorder.async_add_executor_job(
-                statistics_during_period,
+            existing, predecessors = await recorder.async_add_executor_job(
+                _read_statistics_window,
                 self.hass,
-                datetime(1970, 1, 1, tzinfo=dt_util.UTC),
-                None,
+                sorted_records[0]["start"],
                 {consumption_id, cost_id},
-                "hour",
-                {"energy": "kWh"},
-                {"state", "sum"},
             )
             # Validate and build both streams before queuing either write.
             consumption_stats = reconcile_statistics(
-                existing.get(consumption_id, []), sorted_records, "kwh"
+                existing.get(consumption_id, []), sorted_records, "kwh",
+                predecessor=predecessors.get(consumption_id),
             )
             cost_stats = reconcile_statistics(
-                existing.get(cost_id, []), sorted_records, "cost"
+                existing.get(cost_id, []), sorted_records, "cost",
+                predecessor=predecessors.get(cost_id),
             )
         except Exception as err:
             raise HomeAssistantError(f"Could not reconcile statistics; import aborted: {err}") from err

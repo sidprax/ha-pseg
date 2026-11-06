@@ -38,12 +38,13 @@ queue, so waiting for a commit during config-entry setup would deadlock startup.
 The connection sensor reports `pending_startup` during that short interval.
 
 Reconciliation waits for queued Recorder writes before reading and after
-writing. It reads the full existing series and rewrites only the changed
-suffix. Work and memory therefore grow with retained history. Database errors,
-nonfinite values, or inconsistent legacy cumulative totals abort the import.
-This is a conservative guard, not an automatic repair of mixed daily/hourly
-history. Legacy daily-only rows that happen to be internally consistent cannot
-be distinguished from sparse hourly data without a provider replay.
+writing. It reads from the last stored row before the earliest incoming
+interval through the latest stored row, separately for energy and cost.
+An indexed lookup finds the baseline even across a gap. Recent polls leave
+older history outside the read, while an older correction still rebuilds all
+affected later totals. Database errors, nonfinite values, or inconsistent
+cumulative totals in the read window abort the import. Earlier rows outside
+the window are not revalidated on every poll.
 
 Connection status describes portal connectivity. `statistics_import_status`
 separately reports `no_data`, `synchronized`, or `error`. Empty consumption is

@@ -35,24 +35,29 @@ def _start(value: Any) -> datetime:
 
 def reconcile_statistics(
     existing: list[dict[str, Any]], incoming: list[dict[str, Any]], key: str,
+    *, predecessor: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return replacement rows from the first change through the latest row.
 
     Omitted intervals are retained, never invented as zero. Existing sums must
     agree with their interval states. Refuse to guess a repair of legacy mixed
-    daily/hourly or otherwise inconsistent history. Both inputs remain intact.
+    daily/hourly or otherwise inconsistent history. When a predecessor exists,
+    use its committed sum as the baseline and leave that row untouched.
     """
     old = {_start(row["start"]): row for row in existing}
     ordered = sorted(old)
     amounts = {start: _number(old[start].get("state")) for start in ordered}
     offset = 0.0
-    if ordered:
+    if predecessor is not None:
+        _number(predecessor.get("state"))
+        offset = _number(predecessor.get("sum"))
+    elif ordered:
         offset = _number(old[ordered[0]].get("sum")) - amounts[ordered[0]]
-        running = offset
-        for start in ordered:
-            running += amounts[start]
-            if not math.isclose(running, _number(old[start].get("sum")), abs_tol=.00011, rel_tol=0):
-                raise ValueError("Existing statistics are inconsistent; source replay is required")
+    running = offset
+    for start in ordered:
+        running += amounts[start]
+        if not math.isclose(running, _number(old[start].get("sum")), abs_tol=.00011, rel_tol=0):
+            raise ValueError("Existing statistics are inconsistent; source replay is required")
 
     earliest_change = None
     # Last valid observation of an interval wins; duplicate inputs never add up.
@@ -63,18 +68,15 @@ def reconcile_statistics(
         amounts[start] = value
     if earliest_change is None:
         return []
-    if ordered and min(updates) < ordered[0] and not math.isclose(offset, 0, abs_tol=.00001):
-        raise ValueError("Cannot prepend readings before an unknown cumulative baseline")
-
     first = min(amounts)
-    if (
-        not ordered
-        or first < ordered[0]
-        or (math.isclose(offset, 0, abs_tol=.00001) and amounts[first] != 0)
-    ):
-        # A preceding zero anchor lets HA account for the first real interval.
-        amounts[first - timedelta(hours=1)] = 0.0
-        earliest_change = first - timedelta(hours=1)
+    if predecessor is None:
+        zero_baseline = math.isclose(offset, 0, abs_tol=.00001)
+        if ordered and first < ordered[0] and not zero_baseline:
+            raise ValueError("Cannot prepend readings before an unknown cumulative baseline")
+        if not ordered or first < ordered[0] or (zero_baseline and amounts[first] != 0):
+            # A preceding zero anchor lets HA account for the first real interval.
+            earliest_change = first - timedelta(hours=1)
+            amounts[earliest_change] = 0.0
     running = offset
     output = []
     for start in sorted(amounts):

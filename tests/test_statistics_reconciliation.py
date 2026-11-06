@@ -4,9 +4,12 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import random
 import sqlite3
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import column, create_engine, table
+from sqlalchemy.orm import Session
 
 from custom_components.pseg import coordinator as module
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
@@ -143,8 +146,19 @@ class SQLiteRecorder:
     def __init__(self):
         self.db = sqlite3.connect(":memory:")
         self.db.execute("CREATE TABLE stats (id TEXT, start REAL, state REAL, total REAL, PRIMARY KEY(id,start))")
+        self.db.execute("CREATE TABLE stat_meta (id TEXT PRIMARY KEY, statistic_id TEXT UNIQUE)")
+        self.db.execute("""
+            CREATE TRIGGER register_statistic AFTER INSERT ON stats BEGIN
+                INSERT OR IGNORE INTO stat_meta VALUES (NEW.id, NEW.id);
+            END
+        """)
+        self.engine = create_engine("sqlite://", creator=lambda: self.db)
+        self.reads = []
         self.pending = []
         self.barriers = 0
+
+    def get_session(self):
+        return Session(self.engine)
 
     def write(self, hass, metadata, rows):
         self.pending.extend((metadata["statistic_id"], r["start"].timestamp(), r["state"], r["sum"]) for r in rows)
@@ -155,16 +169,41 @@ class SQLiteRecorder:
         self.db.commit()
         self.pending.clear()
 
-    async def async_add_executor_job(self, fn, hass, start, end, ids, period, units, types):
-        assert fn is module.statistics_during_period
+    async def async_add_executor_job(self, fn, *args):
+        return fn(*args)
+
+    def statistics_during_period(self, hass, start, end, ids, period, units, types):
+        self.reads.append((start, ids))
+        assert end is None
         assert period == "hour" and units == {"energy": "kWh"} and types == {"state", "sum"}
         return {id_: [{"start": s, "state": v, "sum": total} for s, v, total in
-                      self.db.execute("SELECT start,state,total FROM stats WHERE id=? ORDER BY start", (id_,))]
+                      self.db.execute(
+                          "SELECT start,state,total FROM stats WHERE id=? AND start>=? ORDER BY start",
+                          (id_, start.timestamp()),
+                      )]
                 for id_ in ids}
 
 
-def test_coordinator_persists_corrections_gaps_and_isolates_daily_history():
+@pytest.fixture
+def sqlite_recorder(monkeypatch):
     recorder = SQLiteRecorder()
+    rows = table("stats", column("id"), column("start"))
+    meta = table("stat_meta", column("id"), column("statistic_id"))
+    monkeypatch.setattr(module, "Statistics", SimpleNamespace(start_ts=rows.c.start, metadata_id=rows.c.id))
+    # Join uses the table itself while its columns are exposed on the model.
+    monkeypatch.setattr(module, "StatisticsMeta", meta)
+    monkeypatch.setattr(meta, "id", meta.c.id, raising=False)
+    monkeypatch.setattr(meta, "statistic_id", meta.c.statistic_id, raising=False)
+    monkeypatch.setattr(module, "get_instance", lambda hass: recorder)
+    monkeypatch.setattr(module, "statistics_during_period", recorder.statistics_during_period)
+    monkeypatch.setattr(module, "async_add_external_statistics", recorder.write)
+    yield recorder
+    recorder.engine.dispose()
+    recorder.db.close()
+
+
+def test_coordinator_persists_corrections_gaps_and_isolates_daily_history(sqlite_recorder):
+    recorder = sqlite_recorder
     # Released backfills may have reset sums between daily chunks. They must
     # neither block clean hourly imports nor be silently rewritten as hourly.
     legacy = "pseg:electricity_consumption"
@@ -192,11 +231,10 @@ def test_coordinator_persists_corrections_gaps_and_isolates_daily_history():
     assert recorder.db.execute("SELECT total FROM stats WHERE id=? ORDER BY start DESC LIMIT 1", ("pseg:electricity_consumption_daily",)).fetchone()[0] == 51
     assert not recorder.pending
     assert list(recorder.db.execute("SELECT * FROM stats WHERE id=? ORDER BY start", (legacy,))) == legacy_rows
-    recorder.db.close()
 
 
-def test_cost_can_be_repaired_when_energy_is_already_current():
-    recorder = SQLiteRecorder()
+def test_cost_can_be_repaired_when_energy_is_already_current(sqlite_recorder):
+    recorder = sqlite_recorder
     recorder.db.execute("INSERT INTO stats VALUES (?,?,?,?)", (ENERGY, START.timestamp(), 1, 1))
     coord = PsegDataUpdateCoordinator(MagicMock(), MagicMock(), {})
     with (patch.object(module, "get_instance", return_value=recorder),
@@ -204,15 +242,44 @@ def test_cost_can_be_repaired_when_energy_is_already_current():
           patch.object(module.dt_util, "as_utc", side_effect=lambda d: d.astimezone(timezone.utc))):
         asyncio.run(coord.async_record_statistics([reading(0, 1)]))
     assert recorder.db.execute("SELECT total FROM stats WHERE id=? ORDER BY start DESC LIMIT 1", (COST,)).fetchone()[0] == .25
-    recorder.db.close()
 
 
-def test_silent_recorder_write_failure_is_detected():
-    recorder = SQLiteRecorder()
+def test_recent_import_reads_only_each_predecessor_and_the_affected_suffix(sqlite_recorder):
+    recorder = sqlite_recorder
+    # Energy reached zero before a long gap. Cost has a different predecessor
+    # and has no rows in the incoming window yet.
+    older_energy = [(ENERGY, reading(-3000, 0)["start"].timestamp(), 5, 5),
+                    (ENERGY, reading(-2000, 0)["start"].timestamp(), -5, 0)]
+    older_cost = [(COST, reading(-1000, 0)["start"].timestamp(), 3, 3)]
+    recorder.db.executemany("INSERT INTO stats VALUES (?,?,?,?)", [
+        *older_energy, *older_cost,
+        (ENERGY, START.timestamp(), 2, 2),
+        (ENERGY, reading(1000, 0)["start"].timestamp(), 4, 6),
+    ])
+    coord = PsegDataUpdateCoordinator(MagicMock(), MagicMock(), {})
+
+    asyncio.run(coord.async_record_statistics([reading(0, 8)]))
+
+    assert set((start, frozenset(ids)) for start, ids in recorder.reads[:2]) == {
+        (reading(-2000, 0)["start"], frozenset({ENERGY})),
+        (reading(-1000, 0)["start"], frozenset({COST})),
+    }
+    assert recorder.reads[2:] == [(START, {ENERGY, COST})]
+    assert list(recorder.db.execute("SELECT * FROM stats WHERE id=? ORDER BY start", (ENERGY,))) == [
+        *older_energy,
+        (ENERGY, START.timestamp(), 8, 8),
+        (ENERGY, reading(1000, 0)["start"].timestamp(), 4, 12),
+    ]
+    assert list(recorder.db.execute("SELECT * FROM stats WHERE id=? ORDER BY start", (COST,))) == [
+        *older_cost, (COST, START.timestamp(), 2, 5),
+    ]
+
+
+def test_silent_recorder_write_failure_is_detected(sqlite_recorder):
+    recorder = sqlite_recorder
     coord = PsegDataUpdateCoordinator(MagicMock(), MagicMock(), {})
     with (patch.object(module, "get_instance", return_value=recorder),
           patch.object(module, "async_add_external_statistics"),
           patch.object(module.dt_util, "as_utc", side_effect=lambda d: d.astimezone(timezone.utc))):
         with pytest.raises(module.HomeAssistantError, match="committed Recorder data"):
             asyncio.run(coord.async_record_statistics([reading(0, 1)]))
-    recorder.db.close()

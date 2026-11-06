@@ -36,7 +36,22 @@ def recorder():
     hass.async_add_executor_job = AsyncMock(side_effect=lambda fn, *args: fn(*args))
     instance = MagicMock()
     instance.async_block_till_done = AsyncMock()
-    instance.async_add_executor_job = AsyncMock(return_value={})
+    instance.statistics_rows = {}
+
+    def read(fn, hass, start, *args):
+        if fn is not module._read_statistics_window:
+            return instance.statistics_rows
+        existing = {}
+        predecessors = {}
+        for statistic_id in args[0]:
+            rows = instance.statistics_rows.get(statistic_id, [])
+            split = next((i for i, row in enumerate(rows) if row["start"] >= start.timestamp()), len(rows))
+            existing[statistic_id] = rows[split:]
+            if split:
+                predecessors[statistic_id] = rows[split - 1]
+        return existing, predecessors
+
+    instance.async_add_executor_job = AsyncMock(side_effect=read)
     coord = PsegDataUpdateCoordinator(hass, MagicMock(), {})
     with (
         patch.object(module, "get_instance", return_value=instance),
@@ -45,7 +60,7 @@ def recorder():
         patch.object(module.dt_util, "as_utc", side_effect=lambda d: d.astimezone(UTC)),
     ):
         def persist(hass, metadata, rows):
-            database = instance.async_add_executor_job.return_value
+            database = instance.statistics_rows
             id_ = metadata["statistic_id"]
             by_start = {
                 (r["start"].timestamp() if isinstance(r["start"], datetime) else r["start"]): r
@@ -62,9 +77,7 @@ def record(hour=0, kwh=1, cost=.25):
 
 
 def existing(instance, hour=2, energy=4, cost=1):
-    instance.async_add_executor_job.side_effect = None
-    instance.async_add_executor_job.return_value = {}
-    instance.async_add_executor_job.return_value = {
+    instance.statistics_rows = {
         ENERGY: [{"start": (START + timedelta(hours=hour)).timestamp(), "sum": energy, "state": energy}],
         COST: [{"start": (START + timedelta(hours=hour)).timestamp(), "sum": cost, "state": cost}],
     }

@@ -25,6 +25,7 @@ for mod in [
     "homeassistant.components.sensor",
     "homeassistant.components.button",
     "homeassistant.components.recorder",
+    "homeassistant.components.recorder.db_schema",
     "homeassistant.components.recorder.statistics",
     "homeassistant.components.recorder.models",
     "homeassistant.config_entries",
