@@ -42,6 +42,21 @@ Depending on your Home Assistant installation type and whether you prefer runnin
 
 For detailed step-by-step instructions, screenshots, and tradeoffs for each option, see the [Authentication Guide](docs/authentication.md).
 
+### Other MyMeter Utilities & Testers Wanted
+
+While this integration originated for PSE&G New Jersey, the underlying portal platform is **MyMeter** (VertexOne), which powers customer energy portals for multiple investor-owned, municipal, and cooperative utilities across North America (such as PSEG Long Island, Madison Gas & Electric, Silicon Valley Power, and municipal water/electric providers).
+
+The long-term goal is to make both this integration and the companion add-on work with any public MyMeter instance:
+
+- **Currently Supported**:
+  - **PSE&G New Jersey**: Full support across all four authentication methods.
+  - **PSEG Long Island (Experimental)**: Supported via manual browser cookie.
+- **Help Test Other Utilities**:
+  If you use PSEG Long Island or another utility powered by MyMeter (electric, gas, or water) and are interested in helping test or expand support, please [open an issue](https://github.com/sidprax/ha-pseg/issues) or comment on [#2](https://github.com/sidprax/ha-pseg/issues/2).
+
+> [!NOTE]
+> While the integration domain and companion add-on keep the `pseg` identifier for backwards compatibility with existing setups, the integration is intended to support all public MyMeter instances.
+
 ---
 
 ## Architecture & Dependencies
