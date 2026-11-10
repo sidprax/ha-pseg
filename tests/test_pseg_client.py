@@ -47,6 +47,7 @@ from custom_components.pseg.pseg_client import (
     PsegConnectionError,
     point_value,
     portal_time_to_utc,
+    select_meter_series,
 )
 
 
@@ -108,6 +109,30 @@ class TestPortalTimeToUtc(unittest.TestCase):
         self.assertEqual(utc_dt.hour, 17)
         self.assertEqual(utc_dt.day, 15)
         self.assertEqual(utc_dt.month, 1)
+
+
+class TestSelectMeterSeries(unittest.TestCase):
+    """Test selecting the meter series that has readings."""
+
+    def test_prefers_meter_with_readings(self):
+        empty = {"name": "Meter #1", "data": []}
+        with_data = {"name": "Meter #2", "data": [{"x": 1, "y": 1.5}]}
+        self.assertIs(select_meter_series([empty, with_data]), with_data)
+
+    def test_meter_with_only_null_readings_is_skipped(self):
+        empty = {"name": "Meter #1", "data": [{"x": 1, "y": None}]}
+        with_data = {"name": "Meter #2", "data": [{"x": 1, "y": 1.5}]}
+        self.assertIs(select_meter_series([empty, with_data]), with_data)
+
+    def test_falls_back_to_legacy_meter_name(self):
+        meter = {"name": "PSE&G Electric Meter", "data": [{"y": 1.5}]}
+        self.assertIs(select_meter_series([meter]), meter)
+
+    def test_no_meter_series(self):
+        self.assertEqual(
+            select_meter_series([{"name": "Temperature", "data": []}]),
+            {},
+        )
 
 
 class TestParseChartData(unittest.TestCase):
