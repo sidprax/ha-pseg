@@ -17,13 +17,15 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from .const import DEFAULT_ELECTRIC_RATE, DEFAULT_PORTAL_URL
+from .const import DEFAULT_ELECTRIC_RATE, DEFAULT_PORTAL_URL, PORTAL_SERVICE_TYPES
 
 _LOGGER = logging.getLogger(__name__)
 
 # Requested by the keep-alive between scheduled updates: the dashboard's widget
 # loader with an empty region, about 100 bytes, instead of the whole dashboard page
 KEEPALIVE_PATH = "/Widget/LoadWidgets"
+# Selects the service (electric or gas) whose usage the dashboard chart shows
+SERVICE_TYPE_PATH = "/Dashboard/SetServiceType"
 # The portals' local time zone (NJ and Long Island); MyMeter timestamps are wall-clock times in it.
 PORTAL_TIMEZONE = ZoneInfo("America/New_York")
 
@@ -123,6 +125,7 @@ class PsegClient:
         portal_url: str = DEFAULT_PORTAL_URL,
     ) -> None:
         self.base_url = portal_url.rstrip("/")
+        self.service_type = PORTAL_SERVICE_TYPES.get(self.base_url)
         self.cookie = cookie
         try:
             self.user_configured_rate = float(user_configured_rate) if user_configured_rate and float(user_configured_rate) > 0 else None
@@ -236,6 +239,25 @@ class PsegClient:
             raise PsegAuthError("Session expired: Redirected to login")
         self._remember_renewed_cookies()
 
+    def _select_service_type(self) -> None:
+        """Make the dashboard chart show the electric service on portals that also have gas.
+
+        MyMeter answers with a redirect back to the dashboard, which is not followed.
+        The session itself is checked by the dashboard request that follows.
+        """
+        if self.service_type is None:
+            return
+        try:
+            resp = self.session.get(
+                f"{self.base_url}{SERVICE_TYPE_PATH}",
+                params={"ServiceType": self.service_type},
+                allow_redirects=False,
+                timeout=25,
+            )
+        except requests.RequestException as err:
+            raise PsegConnectionError(f"Network error selecting the service: {err}") from err
+        _LOGGER.debug("Selected MyMeter service type %s (HTTP %s)", self.service_type, resp.status_code)
+
     def _get_verification_token(self) -> str:
         """Extract __RequestVerificationToken from the /Dashboard page."""
         try:
@@ -266,6 +288,7 @@ class PsegClient:
         chunk_days: int = 90,
     ) -> list[dict[str, Any]]:
         """Fetch historical usage and cost data across a date range in polite chunks."""
+        self._select_service_type()
         token = self._get_verification_token()
 
         try:
@@ -384,6 +407,7 @@ class PsegClient:
 
     def fetch_energy_data(self, days_back: int = 14) -> Dict[str, Any]:
         """Fetch usage and temperature data using the 3-step MyMeter chart sequence."""
+        self._select_service_type()
         token = self._get_verification_token()
 
         end_dt = datetime.now()
