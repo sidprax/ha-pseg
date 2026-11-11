@@ -85,6 +85,19 @@ class TestServiceTypeSelection(unittest.TestCase):
             with self.subTest(fetch=fetch):
                 self.assertEqual(run_fetch(client, fetch), [("token",)])
 
+    def test_rejected_selection_logs_a_warning_and_fetch_goes_on(self):
+        client = PsegClient(cookie="MM_SID=abc")
+        resp = MagicMock()
+        resp.status_code = 404
+        with patch.object(client.session, "get", return_value=resp), patch.object(
+            client, "_get_verification_token", side_effect=StopFetch
+        ) as token, self.assertLogs(
+            "custom_components.pseg.pseg_client", level="WARNING"
+        ) as logs, self.assertRaises(StopFetch):
+            client.fetch_energy_data()
+        token.assert_called_once()
+        self.assertIn("HTTP 404", logs.output[0])
+
     def test_network_error_is_a_connection_error(self):
         client = PsegClient(cookie="MM_SID=abc")
         with patch.object(

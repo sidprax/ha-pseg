@@ -256,6 +256,12 @@ class PsegClient:
             )
         except requests.RequestException as err:
             raise PsegConnectionError(f"Network error selecting the service: {err}") from err
+        if resp.status_code >= 400:
+            # The chart then shows whichever service was selected before; the fetch goes on.
+            _LOGGER.warning(
+                "MyMeter did not accept service type %s (HTTP %s)", self.service_type, resp.status_code
+            )
+            return
         _LOGGER.debug("Selected MyMeter service type %s (HTTP %s)", self.service_type, resp.status_code)
 
     def _get_verification_token(self) -> str:
