@@ -14,7 +14,7 @@ Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / 
 
 ## Features
 
-- **Daily Smart Meter Readings**: Captures daily electricity usage (`sensor.pseg_electricity_consumption`).
+- **Daily Smart Meter Readings**: Captures daily electricity usage (`sensor.pseg_electricity_consumption`). On PSE&G NJ accounts that also have gas, the electric service is selected before each fetch, so viewing gas in the browser does not change what the integration reads.
 - **Actual & Estimated Cost Tracking**: Queries actual dollar billing from the portal alongside kWh consumption (`sensor.pseg_electricity_cost`), exposing both exact portal billing and derived estimates.
 - **Dynamic 7-Day Average Rate Derivation**: Automatically calculates your effective electric rate (`$/kWh`) from the weighted average of the latest 7 days where both actual cost and kWh are reported by the portal. You can also supply a custom fixed rate in integration options as an override, or fall back to the default rate (`$0.247/kWh`).
 - **Home Assistant Energy Dashboard**: Native Long-Term Statistics (LTS) support for electricity consumption and cost tracking.

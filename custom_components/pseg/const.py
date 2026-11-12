@@ -35,6 +35,14 @@ PORTALS = {
     PORTAL_URL_NJ: "PSE&G New Jersey",
     PORTAL_URL_LI: "PSEG Long Island (experimental)",
 }
+# MyMeter keeps the selected service (electric or gas) in the session, and the usage
+# chart shows whichever one was viewed last, in the browser or by this integration.
+# On portals whose accounts can have both, the electric service is selected before
+# each fetch. Portals without an entry (Long Island: electric only) are left as they are.
+SERVICE_TYPE_ELECTRIC = 1  # gas is 4
+PORTAL_SERVICE_TYPES = {
+    PORTAL_URL_NJ: SERVICE_TYPE_ELECTRIC,
+}
 DEFAULT_ELECTRIC_RATE = 0.247
 
 MFA_METHOD_SMS = "sms"
