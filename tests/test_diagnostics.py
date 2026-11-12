@@ -192,6 +192,25 @@ class TestDiagnostics(unittest.TestCase):
         self.assertFalse(coord["has_cookie"])
         self.assertEqual(coord["cookie_names"], [])
 
+    def test_discovered_meters_are_redacted(self):
+        entry = addon_entry()
+        coordinator = loaded_coordinator(entry)
+        coordinator.discovered_services = [{
+            "type_id": 4, "label": "Natural Gas", "selected": False,
+            "meters": [{
+                "meter_number": "000000000007", "internal_id": "1000008",
+                "active": True, "rate_code": "(PGBRSGH - PGBRSGH)",
+            }],
+        }]
+        result = run(make_hass({entry.entry_id: coordinator}), entry)
+        meter = result["coordinator"]["services"][0]["meters"][0]
+        self.assertEqual(meter["meter_number"], REDACTED)
+        self.assertEqual(meter["internal_id"], REDACTED)
+        self.assertTrue(meter["active"])
+        self.assertEqual(meter["rate_code"], "(PGBRSGH - PGBRSGH)")
+        self.assertNotIn("000000000007", json.dumps(result))
+        self.assertNotIn("1000008", json.dumps(result))
+
     def test_auth_server_url_never_leaks_credentials(self):
         cases = {
             "http://127.0.0.1:8000": "http://127.0.0.1:8000",

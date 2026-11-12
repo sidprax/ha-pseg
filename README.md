@@ -197,7 +197,7 @@ If something isn't working, attach a diagnostics file to your [GitHub issue](htt
 2. Open the menu (three dots) on your entry and select **Download diagnostics**.
 3. Attach the downloaded file to the issue.
 
-The file shows the connection status, sign-in method, whether keep-alive is on, update times, which cookies are present, and your latest readings. Cookie values, passwords, MFA codes, your username, and the meter name are removed, and the add-on address keeps only its host and port. Please still look the file over before posting it.
+The file shows the connection status, sign-in method, whether keep-alive is on, update times, which cookies are present, your latest readings, and discovered usage services and meters. Cookie values, passwords, MFA codes, your username, meter names, meter numbers, and internal meter IDs are removed, and the add-on address keeps only its host and port. Please still look the file over before posting it.
 
 ## License
 
