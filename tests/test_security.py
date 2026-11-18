@@ -500,6 +500,7 @@ class TestCoordinatorReauthSafeguards(unittest.TestCase):
                 ]
             )
             self.client.fetch_history_range = fetch_mock
+            self.coord.async_record_statistics.return_value = 1
 
             # Run backfill
             result = loop.run_until_complete(
