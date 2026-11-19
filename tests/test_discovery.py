@@ -219,7 +219,7 @@ def test_restore_exception_does_not_mask_discovery(discovery_error, restore_erro
 
 
 @pytest.mark.parametrize("error", [None, PsegConnectionError("down"), PsegAuthError("expired")])
-def test_coordinator_discovers_once_under_portal_lock(error):
+def test_coordinator_discovery_runs_under_portal_lock(error):
     async def run():
         hass = MagicMock()
         client = MagicMock()
@@ -237,7 +237,7 @@ def test_coordinator_discovers_once_under_portal_lock(error):
         await coordinator._async_update_data()
         await coordinator._async_update_data()
         assert coordinator.discovered_services == ([] if error else discovered)
-        assert client.discover_services.call_count == 1
+        assert client.discover_services.call_count == (2 if error else 1)
         assert client.fetch_energy_data.call_count == 2
 
     asyncio.run(run())

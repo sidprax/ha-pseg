@@ -39,7 +39,8 @@ PORTALS = {
 # chart shows whichever one was viewed last, in the browser or by this integration.
 # On portals whose accounts can have both, the electric service is selected before
 # each fetch. Portals without an entry (Long Island: electric only) are left as they are.
-SERVICE_TYPE_ELECTRIC = 1  # gas is 4
+SERVICE_TYPE_ELECTRIC = 1
+SERVICE_TYPE_GAS = 4
 PORTAL_SERVICE_TYPES = {
     PORTAL_URL_NJ: SERVICE_TYPE_ELECTRIC,
 }

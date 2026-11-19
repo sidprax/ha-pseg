@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfTemperature
+from homeassistant.const import UnitOfEnergy, UnitOfTemperature, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
@@ -91,8 +91,19 @@ async def async_setup_entry(
         PsegNextUpdateSensor(coordinator, entry),
         PsegConnectionStatusSensor(coordinator, entry),
     ]
+    if coordinator.has_gas_service:
+        entities.append(PsegGasConsumptionSensor(coordinator, entry))
+    gas_sensor_added = coordinator.has_gas_service
 
     async_add_entities(entities)
+
+    def _add_gas_sensor() -> None:
+        nonlocal gas_sensor_added
+        if not gas_sensor_added and coordinator.has_gas_service:
+            gas_sensor_added = True
+            async_add_entities([PsegGasConsumptionSensor(coordinator, entry)])
+
+    entry.async_on_unload(coordinator.async_add_listener(_add_gas_sensor))
 
 
 class PsegBaseSensor(CoordinatorEntity[PsegDataUpdateCoordinator], RestoreEntity, SensorEntity):
@@ -227,6 +238,40 @@ class PsegElectricityConsumptionSensor(PsegBaseSensor):
         attrs["auth_required"] = self.coordinator.auth_required
         attrs["connection_status"] = self.coordinator.status
         return attrs
+
+
+class PsegGasConsumptionSensor(PsegBaseSensor):
+    """Sensor for the latest natural gas billing-period usage in CCF."""
+
+    _attr_name = "Gas Consumption"
+    _attr_device_class = SensorDeviceClass.GAS
+    _attr_state_class = None
+    _attr_native_unit_of_measurement = UnitOfVolume.CENTUM_CUBIC_FEET
+    _attr_icon = "mdi:fire"
+
+    def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "gas_consumption")
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the latest billing-period CCF reading."""
+        records = self._data.get("gas", []) if self._data else []
+        if records:
+            return records[-1].get("ccf")
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the latest billing-period boundaries and meter name."""
+        records = self._data.get("gas", []) if self._data else []
+        if not records:
+            return {}
+        latest = records[-1]
+        return {
+            "period_start": latest.get("start"),
+            "period_end": latest.get("end"),
+            ATTR_METER: latest.get("meter"),
+        }
 
 
 class PsegElectricityCostSensor(PsegBaseSensor):

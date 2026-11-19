@@ -17,7 +17,8 @@ Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / 
 - **Daily Smart Meter Readings**: Captures daily electricity usage (`sensor.pseg_electricity_consumption`). On PSE&G NJ accounts that also have gas, the electric service is selected before each fetch, so viewing gas in the browser does not change what the integration reads.
 - **Actual & Estimated Cost Tracking**: Queries actual dollar billing from the portal alongside kWh consumption (`sensor.pseg_electricity_cost`), exposing both exact portal billing and derived estimates.
 - **Dynamic 7-Day Average Rate Derivation**: Automatically calculates your effective electric rate (`$/kWh`) from the weighted average of the latest 7 days where both actual cost and kWh are reported by the portal. You can also supply a custom fixed rate in integration options as an override, or fall back to the default rate (`$0.247/kWh`).
-- **Home Assistant Energy Dashboard**: Native Long-Term Statistics (LTS) support for electricity consumption and cost tracking.
+- **Natural Gas (NJ)**: On accounts that also have gas, reads the monthly gas billing periods in CCF (`sensor.pseg_gas_consumption`, statistic `pseg:gas_consumption`). See [Natural Gas (NJ)](#natural-gas-nj).
+- **Home Assistant Energy Dashboard**: Native Long-Term Statistics (LTS) support for electricity consumption and cost tracking, and for gas consumption.
 - **Historical Backfill**: Built-in action (`pseg.backfill_history`) to backfill up to 2 years of historical daily usage and billing cost directly into Home Assistant Energy statistics.
 - **Outdoor Temperature**: Records daily low, average, and high temperatures reported alongside meter readings (`sensor.pseg_outdoor_temperature`).
 - **14-Day History**: Provides 14 days of interval usage and cost data in entity state attributes for local charting.
@@ -139,6 +140,10 @@ The integration natively publishes official Home Assistant External Statistics f
 5. Click **Save**.
 
 The Energy Dashboard will automatically display your electric usage and actual billing costs with hourly resolution for recent days and daily trends across the full backfill range.
+
+### Natural Gas (NJ)
+
+For New Jersey accounts where Natural Gas is discovered, the integration exposes monthly billing reads in CCF. Each reading covers about 30 days and typically lags by about one month. Add `pseg:gas_consumption` as a gas source in the Energy Dashboard. Gas cost support is not available yet.
 
 ## Historical Backfill
 

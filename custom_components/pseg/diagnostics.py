@@ -82,7 +82,30 @@ def _summarize_data(data: dict[str, Any] | None) -> dict[str, Any] | None:
     summary = async_redact_data(dict(data), TO_REDACT)
     hourly = summary.pop("hourly_records", None)
     summary["hourly_record_count"] = len(hourly) if isinstance(hourly, list) else None
+    gas = summary.pop("gas", None)
+    if isinstance(gas, list):
+        latest = max(
+            gas,
+            key=lambda record: _date_string(record.get("start")) or "",
+            default=None,
+        )
+        summary["gas_summary"] = {
+            "record_count": len(gas),
+            "latest_period": (
+                {
+                    "start": _date_string(latest.get("start")),
+                    "end": _date_string(latest.get("end")),
+                }
+                if latest
+                else None
+            ),
+        }
     return summary
+
+
+def _date_string(value: Any) -> str | None:
+    """Return a date or datetime as an ISO string."""
+    return value.isoformat() if hasattr(value, "isoformat") else None
 
 
 async def async_get_config_entry_diagnostics(
