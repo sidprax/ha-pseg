@@ -17,8 +17,9 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from .const import DEFAULT_ELECTRIC_RATE, DEFAULT_PORTAL_URL, PORTAL_SERVICE_TYPES
+from .const import DEFAULT_ELECTRIC_RATE, DEFAULT_PORTAL_URL, PORTAL_SERVICE_TYPES, SERVICE_TYPE_GAS
 from .discovery import parse_meters, parse_services
+from .gas import parse_gas_data
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -555,6 +556,79 @@ class PsegClient:
             raise PsegConnectionError(f"Invalid JSON returned from chart data: {err}") from err
 
         return self._parse_chart_data(kwh_data)
+
+    def fetch_gas_data(self, months_back: int = 13) -> list[dict[str, Any]]:
+        """Fetch gas billing-period readings and restore the electric service."""
+        try:
+            self._select_service_type(SERVICE_TYPE_GAS, strict=True)
+            token = self._get_verification_token()
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(days=months_back * 31)
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": self.base_url,
+            }
+            chart_data = {
+                "__RequestVerificationToken": token,
+                "UsageInterval": "6",
+                "UsageType": "1",
+                "jsTargetName": "StorageType",
+                "EnableHoverChart": "true",
+                "Start": start_dt.strftime("%Y-%m-%d"),
+                "End": end_dt.strftime("%Y-%m-%d"),
+                "IsRangeOpen": "False",
+                "MaintainMaxDate": "true",
+                "SelectedViaDateRange": "False",
+                "ChartComparison": "1",
+                "ChartComparison2": "0",
+                "ChartComparison3": "0",
+                "ChartComparison4": "0",
+            }
+            try:
+                response = self.session.post(
+                    f"{self.base_url}/Dashboard/Chart",
+                    data=chart_data,
+                    headers=headers,
+                    timeout=25,
+                )
+                if response.status_code in (401, 403) or is_login_url(response.url):
+                    raise PsegAuthError("Session expired while requesting gas chart data")
+                response.raise_for_status()
+                response = self.session.get(
+                    f"{self.base_url}/Dashboard/ChartData",
+                    params={"_": int(time.time() * 1000)},
+                    headers=headers,
+                    timeout=25,
+                )
+                if response.status_code in (401, 403) or is_login_url(response.url):
+                    raise PsegAuthError("Session expired while reading gas chart data")
+                response.raise_for_status()
+                response_data = response.json()
+            except PsegAuthError:
+                raise
+            except requests.RequestException as err:
+                raise PsegConnectionError(f"Failed to retrieve gas chart data: {err}") from err
+            except ValueError as err:
+                raise PsegConnectionError("Invalid JSON returned from gas chart data") from err
+
+            if isinstance(response_data, dict) and any(
+                isinstance(item, dict) and item.get("Action") == "Redirect"
+                for item in response_data.get("AjaxResults") or []
+            ):
+                raise PsegAuthError("Session expired while reading gas chart data")
+            try:
+                records = parse_gas_data(response_data)
+            except (TypeError, ValueError) as err:
+                raise PsegConnectionError(f"Could not parse gas chart data: {err}") from err
+            if not records:
+                raise PsegConnectionError("No gas billing-period readings returned from MyMeter")
+            return records
+        finally:
+            try:
+                self._select_service_type()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Could not restore the electric service after gas fetch: %s", err)
 
     def _parse_chart_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Parse series into clean sensor model and calculate costs using effective rate."""

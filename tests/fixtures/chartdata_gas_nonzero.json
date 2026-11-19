@@ -1,0 +1,37 @@
+{
+  "Data": {
+    "series": [
+      {
+        "visible": false,
+        "data": [[1782864000000, 0.0]]
+      },
+      {
+        "name": "000000000042 (PGBRSGH)",
+        "tooltip": {"valueSuffix": " CCF"},
+        "data": [
+          {"x": 1785542400000, "y": 120.5, "hs": {"start": "7/14/2026", "end": "8/11/2026"}},
+          {"x": 1788220800000, "y": 0, "hs": {"start": "8/12/2026", "end": "9/10/2026"}}
+        ]
+      },
+      {
+        "name": "000000000043 (PGBRSGH)",
+        "tooltip": {"valueSuffix": " CCF"},
+        "data": []
+      },
+      {
+        "name": "000000000044 (PGBRSGH)",
+        "tooltip": {"valueSuffix": " CCF"},
+        "data": [
+          {"x": 1790812800000, "y": 0, "hs": {"start": "9/11/2026", "end": "10/9/2026"}}
+        ]
+      },
+      {
+        "name": "Temperature",
+        "tooltip": {"valueSuffix": " \u00b0F"},
+        "data": [
+          {"x": 1785542400000, "y": 77.1, "hs": {"start": "7/14/2026", "end": "8/11/2026"}}
+        ]
+      }
+    ]
+  }
+}

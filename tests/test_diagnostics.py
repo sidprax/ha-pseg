@@ -1,12 +1,12 @@
 """Unit tests for the diagnostics download."""
 
 import asyncio
-from datetime import datetime, timezone
 import json
 import os
 import sys
 import types
 import unittest
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock
 
 # Ensure repo root is on sys.path for direct unittest invocation
@@ -210,6 +210,27 @@ class TestDiagnostics(unittest.TestCase):
         self.assertEqual(meter["rate_code"], "(PGBRSGH - PGBRSGH)")
         self.assertNotIn("000000000007", json.dumps(result))
         self.assertNotIn("1000008", json.dumps(result))
+
+    def test_gas_diagnostics_include_period_summary_without_meter_name(self):
+        entry = addon_entry()
+        coordinator = loaded_coordinator(entry)
+        coordinator.data["gas"] = [{
+            "start": date(2026, 8, 1),
+            "end": date(2026, 8, 31),
+            "ccf": 42.0,
+            "meter": "000000000007 (PGBRSGH)",
+        }]
+
+        result = run(make_hass({entry.entry_id: coordinator}), entry)
+
+        self.assertEqual(
+            result["coordinator"]["data"]["gas_summary"],
+            {
+                "record_count": 1,
+                "latest_period": {"start": "2026-08-01", "end": "2026-08-31"},
+            },
+        )
+        self.assertNotIn("000000000007", json.dumps(result))
 
     def test_auth_server_url_never_leaks_credentials(self):
         cases = {

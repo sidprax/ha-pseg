@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 import logging
 import random
 from typing import Any, Dict, Optional
@@ -42,8 +42,9 @@ from .const import (
     DOMAIN,
     KEEPALIVE_MAX_SECONDS,
     KEEPALIVE_MIN_SECONDS,
+    SERVICE_TYPE_GAS,
 )
-from .pseg_client import PsegAuthError, PsegClient, PsegConnectionError
+from .pseg_client import PORTAL_TIMEZONE, PsegAuthError, PsegClient, PsegConnectionError
 from .util import get_valid_auth_server_url, is_valid_auth_server_url, sanitize_url_for_logging
 
 _LOGGER = logging.getLogger(__name__)
@@ -115,6 +116,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self._portal_lock = asyncio.Lock()
         self.discovered_services: list[dict[str, Any]] = []
         self._discovery_attempted = False
+        self._gas_data: list[dict[str, Any]] | None = None
+        self._last_gas_attempt: datetime | None = None
 
         # Resolve optional user-configured rate override (None enables auto-derived 7-day average)
         user_rate = None
@@ -145,6 +148,11 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     def electric_rate(self) -> float:
         """Return effective rate for backwards compatibility."""
         return self.effective_rate
+
+    @property
+    def has_gas_service(self) -> bool:
+        """Return whether service discovery found gas."""
+        return any(service.get("type_id") == SERVICE_TYPE_GAS for service in self.discovered_services)
 
     def _dismiss_auth_issues(self) -> None:
         """Dismiss persistent notification and repairs issue once authenticated."""
@@ -388,11 +396,11 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         """Fetch data from PSE&G."""
         async with self._portal_lock:
             if not self._discovery_attempted:
-                self._discovery_attempted = True
                 try:
                     self.discovered_services = await self.hass.async_add_executor_job(
                         self.client.discover_services
                     )
+                    self._discovery_attempted = True
                 except (PsegAuthError, PsegConnectionError) as err:
                     _LOGGER.warning("Service discovery failed: %s", err)
             return await self._async_fetch_and_record()
@@ -409,6 +417,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                     await self.async_record_statistics(records, is_backfill=False)
                 except Exception as stat_err:
                     _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+            await self._async_fetch_gas_if_due(data)
             self.next_update_time = dt_util.utcnow() + self.update_interval
             data["next_update"] = self.next_update_time.isoformat()
             self._last_valid_data = data
@@ -442,6 +451,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                         await self.async_record_statistics(records, is_backfill=False)
                     except Exception as stat_err:
                         _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+                await self._async_fetch_gas_if_due(data)
                 self.next_update_time = dt_util.utcnow() + self.update_interval
                 data["next_update"] = self.next_update_time.isoformat()
                 self._last_valid_data = data
@@ -482,6 +492,124 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         except Exception as err:
             self.status = "error"
             raise UpdateFailed(f"Error communicating with PSE&G: {err}") from err
+
+    async def _async_fetch_gas_if_due(self, data: dict[str, Any]) -> None:
+        """Refresh gas daily, retrying authentication failures on the next poll."""
+        if not self.has_gas_service:
+            return
+
+        now = dt_util.utcnow()
+        if self._last_gas_attempt and now - self._last_gas_attempt < timedelta(hours=24):
+            if self._gas_data is not None:
+                data["gas"] = self._gas_data
+            return
+
+        previous_attempt = self._last_gas_attempt
+        self._last_gas_attempt = now
+        try:
+            gas_records = await self.hass.async_add_executor_job(
+                self.client.fetch_gas_data, 13
+            )
+        except (PsegAuthError, PsegConnectionError) as err:
+            if isinstance(err, PsegAuthError):
+                self._last_gas_attempt = previous_attempt
+            _LOGGER.warning("Could not fetch PSE&G gas usage: %s", err)
+            if self._gas_data is not None:
+                data["gas"] = self._gas_data
+            return
+
+        self._gas_data = gas_records
+        data["gas"] = gas_records
+        try:
+            await self.async_record_gas_statistics(gas_records)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not record gas statistics into LTS: %s", err)
+
+    async def async_record_gas_statistics(
+        self, records: list[dict[str, Any]]
+    ) -> None:
+        """Import gas billing periods into Home Assistant external statistics."""
+        if not records:
+            return
+
+        normalized = []
+        for record in records:
+            period_start = record.get("start")
+            if isinstance(period_start, datetime):
+                local_date = period_start.date()
+            elif isinstance(period_start, date):
+                local_date = period_start
+            else:
+                continue
+            try:
+                ccf = float(record["ccf"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            start_utc = datetime.combine(
+                local_date, time.min, tzinfo=PORTAL_TIMEZONE
+            ).astimezone(dt_util.UTC)
+            normalized.append({"start": start_utc, "ccf": ccf})
+
+        if not normalized:
+            return
+
+        normalized.sort(key=lambda item: item["start"])
+        statistic_id = f"{DOMAIN}:gas_consumption"
+        baseline_sum = 0.0
+        first_start = normalized[0]["start"]
+        last_stats = await get_instance(self.hass).async_add_executor_job(
+            get_last_statistics,
+            self.hass,
+            1000,
+            statistic_id,
+            True,
+            {"sum"},
+        )
+        previous = []
+        for statistic in last_stats.get(statistic_id, []):
+            start = statistic.get("start")
+            if isinstance(start, (int, float)):
+                start = datetime.fromtimestamp(start, tz=dt_util.UTC)
+            elif isinstance(start, datetime):
+                start = dt_util.as_utc(start)
+            else:
+                continue
+            if start < first_start:
+                previous.append((start, float(statistic.get("sum") or 0.0)))
+        if previous:
+            baseline_sum = max(previous, key=lambda item: item[0])[1]
+
+        metadata: StatisticMetaData = {
+            "has_mean": False,
+            "has_sum": True,
+            "mean_type": 0,
+            "unit_class": "volume",
+            "name": "PSE&G Gas Consumption",
+            "source": DOMAIN,
+            "statistic_id": statistic_id,
+            "unit_of_measurement": "CCF",
+        }
+        statistics: list[StatisticData] = []
+        running_sum = baseline_sum
+        for item in normalized:
+            ccf = item["ccf"]
+            running_sum += ccf
+            statistics.append(
+                StatisticData(
+                    start=item["start"],
+                    state=ccf,
+                    sum=round(running_sum, 4),
+                )
+            )
+
+        async_add_external_statistics(self.hass, metadata, statistics)
+        _LOGGER.info(
+            "Added %d gas billing periods to LTS for %s (%s to %s)",
+            len(statistics),
+            statistic_id,
+            statistics[0]["start"].isoformat(),
+            statistics[-1]["start"].isoformat(),
+        )
 
     async def async_record_statistics(
         self,
