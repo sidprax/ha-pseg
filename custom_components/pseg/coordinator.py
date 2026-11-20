@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 import logging
 import random
 from typing import Any, Dict, Optional
@@ -20,6 +20,7 @@ from homeassistant.components.recorder.models import StatisticData, StatisticMet
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -477,10 +478,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self,
         records: list[dict[str, Any]],
         is_backfill: bool = False,
-    ) -> None:
-        """Import energy consumption and cost records into Home Assistant external long-term statistics."""
+    ) -> int:
+        """Import energy statistics and return the number of records inserted."""
         if not records:
-            return
+            return 0
 
         tz = dt_util.get_time_zone(self.hass.config.time_zone)
 
@@ -505,7 +506,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             normalized_records.append({"start": start_dt, "kwh": kwh, "cost": cost})
 
         if not normalized_records:
-            return
+            return 0
 
         sorted_records = sorted(normalized_records, key=lambda x: x["start"])
 
@@ -533,6 +534,16 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             "statistic_id": cost_id,
             "unit_of_measurement": "USD",
         }
+
+        if is_backfill:
+            return await self._async_record_backfill_statistics(
+                sorted_records,
+                tz,
+                consumption_id,
+                cost_id,
+                consumption_meta,
+                cost_meta,
+            )
 
         # Check existing external statistics in Home Assistant
         last_stat_start_dt: Optional[datetime] = None
@@ -612,7 +623,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
         if not records_to_process and len(consumption_stats) <= 1:
             _LOGGER.debug("No new statistics to record (all records <= %s)", last_stat_start_dt)
-            return
+            return 0
 
         for r in records_to_process:
             start_utc = r["start"]
@@ -647,6 +658,130 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             consumption_stats[0]["start"].isoformat(),
             consumption_stats[-1]["start"].isoformat(),
         )
+        return len(records_to_process)
+
+    async def _async_record_backfill_statistics(
+        self,
+        records: list[dict[str, Any]],
+        tz: Any,
+        consumption_id: str,
+        cost_id: str,
+        consumption_meta: StatisticMetaData,
+        cost_meta: StatisticMetaData,
+    ) -> int:
+        """Insert missing daily rows, rechain sums, and return the inserted count."""
+        query_start = datetime.min.replace(tzinfo=dt_util.UTC)
+
+        try:
+            existing = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                query_start,
+                None,
+                {consumption_id, cost_id},
+                "hour",
+                None,
+                {"state", "sum"},
+            )
+            if not isinstance(existing, dict):
+                raise TypeError("Recorder returned an invalid statistics result")
+
+            existing_by_id: dict[str, list[dict[str, Any]]] = {}
+            existing_days: set[date] = set()
+            for statistic_id in (consumption_id, cost_id):
+                rows = existing.get(statistic_id, [])
+                if not isinstance(rows, list):
+                    raise TypeError(f"Recorder returned invalid rows for {statistic_id}")
+                normalized_rows = []
+                for row in rows:
+                    start = row["start"]
+                    if isinstance(start, (int, float)):
+                        start = datetime.fromtimestamp(start, tz=dt_util.UTC)
+                    elif isinstance(start, datetime):
+                        start = dt_util.as_utc(start)
+                    else:
+                        raise TypeError(f"Recorder returned an invalid start for {statistic_id}")
+                    normalized_rows.append(
+                        {
+                            "start": start,
+                            "state": float(row["state"]),
+                            "sum": float(row["sum"]),
+                        }
+                    )
+                    if float(row["state"]) != 0:
+                        existing_days.add(start.astimezone(tz).date())
+                existing_by_id[statistic_id] = normalized_rows
+        except Exception as err:
+            _LOGGER.error(
+                "Could not read existing PSE&G statistics; backfill was not recorded: %s",
+                err,
+            )
+            raise HomeAssistantError(
+                "Could not read existing PSE&G statistics; backfill was not recorded."
+            ) from err
+
+        records_to_insert = [
+            record
+            for record in records
+            if record["start"].astimezone(tz).date() not in existing_days
+        ]
+        if not records_to_insert:
+            _LOGGER.debug("Backfill contains no days without existing statistics")
+            return 0
+
+        first_insert = records_to_insert[0]["start"]
+        first_insert_day = first_insert.astimezone(tz).date()
+        anchor_start = dt_util.as_utc(
+            datetime.combine(
+                first_insert_day - timedelta(days=1),
+                time.min,
+                tzinfo=tz,
+            )
+        )
+
+        def rechain(statistic_id: str, key: str) -> list[StatisticData]:
+            """Keep existing interval amounts and rebuild sums after the insert point."""
+            rows = existing_by_id[statistic_id]
+            prior_rows = [row for row in rows if row["start"] < first_insert]
+            running = (
+                max(prior_rows, key=lambda row: row["start"])["sum"]
+                if prior_rows
+                else 0.0
+            )
+            merged = {
+                row["start"]: {"start": row["start"], "state": row["state"]}
+                for row in rows
+                if row["start"] >= first_insert
+            }
+            for record in records_to_insert:
+                merged[record["start"]] = {
+                    "start": record["start"],
+                    "state": record[key],
+                }
+
+            output: list[StatisticData] = []
+            if not prior_rows:
+                merged[anchor_start] = {
+                    "start": anchor_start,
+                    "state": 0.0,
+                }
+            for start in sorted(merged):
+                row = merged[start]
+                running += row["state"]
+                output.append(
+                    StatisticData(
+                        start=start,
+                        state=row["state"],
+                        sum=round(running, 4),
+                    )
+                )
+            return output
+
+        consumption_stats = rechain(consumption_id, "kwh")
+        cost_stats = rechain(cost_id, "cost")
+        async_add_external_statistics(self.hass, consumption_meta, consumption_stats)
+        async_add_external_statistics(self.hass, cost_meta, cost_stats)
+        return len(records_to_insert)
 
     async def async_backfill_history(
         self,
@@ -734,7 +869,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             _LOGGER.warning("No historical records returned from PSE&G for %s to %s", start_date_str, end_date_str)
             return 0
 
-        await self.async_record_statistics(records, is_backfill=True)
+        inserted_count = await self.async_record_statistics(records, is_backfill=True)
 
         # Update coordinator state if backfill includes latest readings
         latest_record = records[-1]
@@ -750,5 +885,5 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 self._last_valid_data["previous_cost"] = prev_record["cost"]
             self.async_set_updated_data(self._last_valid_data)
 
-        _LOGGER.info("Completed PSE&G backfill: imported %d days of statistics", len(records))
-        return len(records)
+        _LOGGER.info("Completed PSE&G backfill: daily statistics imported: %d", inserted_count)
+        return inserted_count
