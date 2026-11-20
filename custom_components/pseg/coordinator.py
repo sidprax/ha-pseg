@@ -113,6 +113,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         # POST /Dashboard/Chart setup and the GET /Dashboard/ChartData read, so only
         # one fetch (and its statistics import) may use the session at a time
         self._portal_lock = asyncio.Lock()
+        self.discovered_services: list[dict[str, Any]] = []
+        self._discovery_attempted = False
 
         # Resolve optional user-configured rate override (None enables auto-derived 7-day average)
         user_rate = None
@@ -385,6 +387,14 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from PSE&G."""
         async with self._portal_lock:
+            if not self._discovery_attempted:
+                self._discovery_attempted = True
+                try:
+                    self.discovered_services = await self.hass.async_add_executor_job(
+                        self.client.discover_services
+                    )
+                except (PsegAuthError, PsegConnectionError) as err:
+                    _LOGGER.warning("Service discovery failed: %s", err)
             return await self._async_fetch_and_record()
 
     async def _async_fetch_and_record(self) -> Dict[str, Any]:

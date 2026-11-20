@@ -30,6 +30,8 @@ TO_REDACT = {
     CONF_USERNAME,
     # Poll data: the meter name from the portal is account data
     "meter",
+    "meter_number",
+    "internal_id",
 }
 
 
@@ -120,6 +122,7 @@ async def async_get_config_entry_diagnostics(
         "days_used_for_rate": coordinator.days_used_for_rate,
         "has_cookie": bool(coordinator.client.cookie),
         "cookie_names": _cookie_names(coordinator.client.cookie),
+        "services": async_redact_data(coordinator.discovered_services, TO_REDACT),
         "data": _summarize_data(coordinator.data),
     }
     return diagnostics

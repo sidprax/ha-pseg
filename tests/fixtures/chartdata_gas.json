@@ -1,0 +1,156 @@
+{
+ "Data": {
+  "series": [
+   {
+    "dataGrouping": {
+     "enabled": false
+    },
+    "showInLegend": true,
+    "visible": false,
+    "data": [
+     [
+      1782864000000,
+      0.0
+     ],
+     [
+      1785542400000,
+      0.0
+     ],
+     [
+      1790812800000,
+      0.0
+     ]
+    ],
+    "showMinMax_MM": false
+   },
+   {
+    "name": "000000000007 (PGBRSGH)",
+    "tooltip": {
+     "valueSuffix": " CCF",
+     "valueDecimals": 2
+    },
+    "type": "column",
+    "dataGrouping": {
+     "enabled": false
+    },
+    "showInLegend": false,
+    "visible": true,
+    "data": [
+     {
+      "x": 1785542400000,
+      "y": 0,
+      "hs": {
+       "start": "7/14/2026",
+       "end": "8/11/2026"
+      },
+      "v": false
+     },
+     {
+      "x": 1788220800000,
+      "y": 0,
+      "hs": {
+       "start": "8/12/2026",
+       "end": "9/10/2026"
+      },
+      "v": false
+     },
+     {
+      "x": 1790812800000,
+      "y": 0,
+      "hs": {
+       "start": "9/11/2026",
+       "end": "10/9/2026"
+      },
+      "v": false
+     }
+    ],
+    "dateFormatString": "%B %Y",
+    "showMinMax_MM": false
+   },
+   {
+    "name": "000000000010 (PGBRSGH)",
+    "tooltip": {
+     "valueSuffix": " CCF",
+     "valueDecimals": 2
+    },
+    "type": "column",
+    "dataGrouping": {
+     "enabled": false
+    },
+    "showInLegend": false,
+    "visible": true,
+    "data": [],
+    "showMinMax_MM": false
+   },
+   {
+    "name": "Temperature",
+    "tooltip": {
+     "valueSuffix": " \u00b0F",
+     "valueDecimals": 0
+    },
+    "type": "spline",
+    "yAxis": 1,
+    "dataGrouping": {
+     "enabled": false
+    },
+    "showInLegend": true,
+    "visible": true,
+    "lineWidth": 3,
+    "data": [
+     {
+      "x": 1785542400000,
+      "y": 77.100000000013,
+      "tr": "60\u00b0 | 78\u00b0 | 95\u00b0F"
+     },
+     {
+      "x": 1788220800000,
+      "y": 70.10000000000014,
+      "tr": "54\u00b0 | 70\u00b0 | 90\u00b0F"
+     },
+     {
+      "x": 1790812800000,
+      "y": 59.00000000000015,
+      "tr": "37\u00b0 | 59\u00b0 | 87\u00b0F"
+     }
+    ],
+    "dateFormatString": "%B %Y",
+    "showMinMax_MM": false
+   },
+   {
+    "name": "Gas Marker",
+    "type": "flags",
+    "dataGrouping": {
+     "enabled": false
+    },
+    "showInLegend": true,
+    "visible": true,
+    "data": [],
+    "shape": "circlepin",
+    "showMinMax_MM": false
+   }
+  ],
+  "usageType": "Consumption",
+  "yAxis": [
+   {
+    "title": {
+     "text": "CCF"
+    }
+   }
+  ],
+  "tooltipOptions": {
+   "meterCount": 2,
+   "decimalFormat": 2,
+   "isSideBySide": false,
+   "hideAsteriskForEstimatedRead": false,
+   "enableHoverChart": true,
+   "storageType": "billing",
+   "additiveUsageType": true,
+   "averagedUsageType": false,
+   "usageTypeDisplayName": "Consumption",
+   "locale": "en-US",
+   "currency": "USD",
+   "currencyPositivePattern": "0",
+   "billingIncludeEndDate": 0
+  }
+ }
+}

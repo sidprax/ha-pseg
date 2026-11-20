@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from .const import DEFAULT_ELECTRIC_RATE, DEFAULT_PORTAL_URL, PORTAL_SERVICE_TYPES
+from .discovery import parse_meters, parse_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -239,30 +240,122 @@ class PsegClient:
             raise PsegAuthError("Session expired: Redirected to login")
         self._remember_renewed_cookies()
 
-    def _select_service_type(self) -> None:
+    def _select_service_type(self, service_type: int | None = None, *, strict: bool = False) -> None:
         """Make the dashboard chart show the electric service on portals that also have gas.
 
         MyMeter answers with a redirect back to the dashboard, which is not followed.
         The session itself is checked by the dashboard request that follows.
         """
-        if self.service_type is None:
+        if service_type is None:
+            service_type = self.service_type
+        if service_type is None:
             return
         try:
             resp = self.session.get(
                 f"{self.base_url}{SERVICE_TYPE_PATH}",
-                params={"ServiceType": self.service_type},
+                params={"ServiceType": service_type},
                 allow_redirects=False,
                 timeout=25,
             )
         except requests.RequestException as err:
             raise PsegConnectionError(f"Network error selecting the service: {err}") from err
+        if strict and resp.status_code in (401, 403):
+            raise PsegAuthError(f"HTTP status {resp.status_code} received from portal")
         if resp.status_code >= 400:
+            if strict:
+                raise PsegConnectionError(
+                    f"MyMeter did not accept service type {service_type} (HTTP {resp.status_code})"
+                )
             # The chart then shows whichever service was selected before; the fetch goes on.
             _LOGGER.warning(
-                "MyMeter did not accept service type %s (HTTP %s)", self.service_type, resp.status_code
+                "MyMeter did not accept service type %s (HTTP %s)", service_type, resp.status_code
             )
             return
-        _LOGGER.debug("Selected MyMeter service type %s (HTTP %s)", self.service_type, resp.status_code)
+        if strict and resp.is_redirect and is_login_url(resp.headers.get("Location", "")):
+            raise PsegAuthError("Session expired: Redirected to login")
+        _LOGGER.debug("Selected MyMeter service type %s (HTTP %s)", service_type, resp.status_code)
+
+    def discover_services(self) -> list[dict[str, Any]]:
+        """Discover usage services and their meters, restoring electric afterwards.
+
+        The coordinator must hold its portal lock for the whole sequence.
+        """
+        try:
+            token = self._get_verification_token()
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-Requested-With": "XMLHttpRequest",
+                "Origin": self.base_url,
+            }
+            end = datetime.now()
+            data = {
+                "__RequestVerificationToken": token,
+                "UsageInterval": "5",
+                "UsageType": "1",
+                "jsTargetName": "StorageType",
+                "EnableHoverChart": "true",
+                "Start": (end - timedelta(days=14)).strftime("%Y-%m-%d"),
+                "End": end.strftime("%Y-%m-%d"),
+                "IsRangeOpen": "False",
+                "MaintainMaxDate": "true",
+                "SelectedViaDateRange": "False",
+                "ChartComparison": "1",
+                "ChartComparison2": "0",
+                "ChartComparison3": "0",
+                "ChartComparison4": "0",
+            }
+
+            def chart() -> Any:
+                try:
+                    response = self.session.post(
+                        f"{self.base_url}/Dashboard/Chart", data=data, headers=headers, timeout=25
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+                except requests.RequestException as err:
+                    raise PsegConnectionError(f"Failed to discover services: {err}") from err
+                except ValueError as err:
+                    raise PsegConnectionError("Invalid JSON returned during service discovery") from err
+                if isinstance(result, dict) and isinstance(result.get("AjaxResults"), list):
+                    if any(
+                        isinstance(item, dict) and item.get("Action") == "Redirect"
+                        for item in result["AjaxResults"]
+                    ):
+                        raise PsegAuthError("Session expired during service discovery")
+                return result
+
+            initial = chart()
+            services = parse_services(initial)
+            electric = next(
+                (service for service in services if service["label"].casefold() == "electric"), None
+            )
+            if electric:
+                self.service_type = electric["type_id"]
+            usage = [
+                service for service in services
+                if service["label"].casefold() in ("electric", "natural gas")
+            ]
+            if self.service_type is None and usage:
+                _LOGGER.warning("Cannot switch services without an electric service to restore")
+                usage = [service for service in usage if service["selected"]]
+            for service in usage:
+                if service["selected"]:
+                    response = initial
+                else:
+                    self._select_service_type(service["type_id"], strict=True)
+                    response = chart()
+                    if not any(
+                        entry["selected"] and entry["type_id"] == service["type_id"]
+                        for entry in parse_services(response)
+                    ):
+                        raise PsegConnectionError("MyMeter did not switch to the requested service")
+                service["meters"] = parse_meters(response)
+            return usage
+        finally:
+            try:
+                self._select_service_type()
+            except Exception as err:
+                _LOGGER.warning("Could not restore the electric service after discovery: %s", err)
 
     def _get_verification_token(self) -> str:
         """Extract __RequestVerificationToken from the /Dashboard page."""
