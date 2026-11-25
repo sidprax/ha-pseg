@@ -170,7 +170,12 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_cookie()
         working_url = await self._async_detect_auth_server()
         if working_url:
-            menu_options = ["reauth_confirm", "cookie_mymeter", "cookie_okta"]
+            menu_options = [
+                "automated_mymeter",
+                "reauth_confirm",
+                "cookie_mymeter",
+                "cookie_okta",
+            ]
             addon_status = ""
         else:
             menu_options = ["cookie_mymeter", "cookie_okta"]
@@ -461,9 +466,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if not connected and not errors:
                     errors["base"] = "auth_server_unavailable"
 
+        reauth_entry = getattr(self, "_reauth_entry", None)
+        default_username = reauth_entry.data.get(CONF_USERNAME, "") if reauth_entry else ""
         schema = vol.Schema(
             {
-                vol.Required(CONF_USERNAME): str,
+                vol.Required(CONF_USERNAME, default=default_username): str,
                 vol.Required(CONF_PASSWORD): str,
             }
         )
