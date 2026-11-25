@@ -297,7 +297,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                                 return ReauthStatus("failed")
                             elif resp.status in (401, 403):
                                 try:
-                                    err_json = await resp.json(content_type=None)
+                                    err_json = await resp.json()
                                 except Exception:
                                     err_json = {}
                                 if isinstance(err_json, dict) and (
