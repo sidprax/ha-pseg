@@ -296,6 +296,18 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                                 )
                                 return ReauthStatus("failed")
                             elif resp.status in (401, 403):
+                                try:
+                                    err_json = await resp.json(content_type=None)
+                                except Exception:
+                                    err_json = {}
+                                if isinstance(err_json, dict) and (
+                                    err_json.get("recaptcha_blocked") is True
+                                    or "recaptcha_blocked" in str(err_json.get("error", ""))
+                                ):
+                                    _LOGGER.warning(
+                                        "Companion login temporarily blocked by Google reCAPTCHA; will retry on next poll"
+                                    )
+                                    return ReauthStatus("recaptcha_blocked")
                                 _LOGGER.warning(
                                     "Companion returned portal auth rejection HTTP %s during login",
                                     resp.status,
@@ -450,6 +462,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             if reauth_result == "skipped_cooldown":
                 _LOGGER.info("PSE&G re-authentication cooldown active; pausing automated retry")
                 raise UpdateFailed("PSE&G re-authentication cooldown active; temporary pause before retry") from err
+
+            if reauth_result == "recaptcha_blocked":
+                self.status = "error"
+                raise UpdateFailed(
+                    "PSE&G companion login temporarily blocked by Google reCAPTCHA; will retry automatically"
+                ) from err
 
             # Silent re-authentication could not complete -> alert user and trigger Reconfigure
             username = self.entry_data.get(CONF_USERNAME)

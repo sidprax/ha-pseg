@@ -349,11 +349,25 @@ class TestCoordinatorReauthSafeguards(unittest.TestCase):
         loop = asyncio.new_event_loop()
         try:
             self.session.post = MagicMock(
-                return_value=MockResponse(403, {"error": "recaptcha_blocked"})
+                return_value=MockResponse(403, {"error": "Unauthorized"})
             )
             result = loop.run_until_complete(self.coord.async_reauthenticate())
             self.assertFalse(result)
             self.assertEqual(self.coord._reauth_failure_count, 1)
+            self.assertTrue(self.coord._addon_connected)
+        finally:
+            loop.close()
+
+    def test_recaptcha_blocked_403_does_not_increment_failures(self):
+        loop = asyncio.new_event_loop()
+        try:
+            self.session.post = MagicMock(
+                return_value=MockResponse(403, {"error": "recaptcha_blocked", "recaptcha_blocked": True})
+            )
+            result = loop.run_until_complete(self.coord.async_reauthenticate())
+            self.assertFalse(result)
+            self.assertEqual(result, "recaptcha_blocked")
+            self.assertEqual(self.coord._reauth_failure_count, 0)
             self.assertTrue(self.coord._addon_connected)
         finally:
             loop.close()
