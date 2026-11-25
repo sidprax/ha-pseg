@@ -71,7 +71,8 @@
         "title": "Re-authenticate PSE&G",
         "description": "{addon_status}Your PSE&G session has expired. Select how you would like to re-authenticate:",
         "menu_options": {
-          "reauth_confirm": "Automated Sign-In (Credentials & MFA)",
+          "automated_mymeter": "Automated Sign-In: Direct MyMeter (Recommended, Zero 2FA)",
+          "reauth_confirm": "Automated Sign-In: Primary PSE&G Account (Okta 2FA)",
           "cookie_mymeter": "Persistent Browser Cookie: Direct MyMeter",
           "cookie_okta": "Session Browser Cookie: Primary PSE&G Account"
         }
