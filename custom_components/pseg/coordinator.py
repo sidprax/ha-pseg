@@ -311,7 +311,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                                     "Companion service error HTTP %s during login; will retry on next poll",
                                     resp.status,
                                 )
-                                return ReauthStatus("failed")
+                                return ReauthStatus("companion_error")
                             else:
                                 _LOGGER.warning(
                                     "Companion returned unexpected HTTP %s during login",
@@ -473,6 +473,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                     "PSE&G companion login temporarily blocked by Google reCAPTCHA; will retry automatically"
                 ) from err
 
+            if reauth_result == "companion_error":
+                self.status = "error"
+                raise UpdateFailed(
+                    "PSE&G companion service returned a temporary error; will retry automatically"
+                ) from err
+
             # Silent re-authentication could not complete -> alert user and trigger Reconfigure
             username = self.entry_data.get(CONF_USERNAME)
             is_cookie_mode = (
@@ -523,6 +529,53 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
         return sorted(normalized_records, key=lambda x: x["start"])
 
+    async def _apply_historical_rates_to_return_records(
+        self,
+        sorted_records: list[dict[str, Any]],
+        tz: Any,
+    ) -> None:
+        """Align backfilled return compensation with each day's existing consumption rate."""
+        consumption_id = f"{DOMAIN}:electricity_consumption"
+        cost_id = f"{DOMAIN}:electricity_cost"
+        query_start = datetime.min.replace(tzinfo=dt_util.UTC)
+        try:
+            existing = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                query_start,
+                None,
+                {consumption_id, cost_id},
+                "hour",
+                None,
+                {"state"},
+            )
+            if not isinstance(existing, dict):
+                return
+        except Exception as err:
+            _LOGGER.debug("Could not query historical rates for return backfill: %s", err)
+            return
+
+        daily_kwh: dict[date, float] = {}
+        daily_cost: dict[date, float] = {}
+        for stat_id, target in ((consumption_id, daily_kwh), (cost_id, daily_cost)):
+            for row in existing.get(stat_id, []) or []:
+                start = row.get("start")
+                if isinstance(start, (int, float)):
+                    start_dt = datetime.fromtimestamp(start, tz=dt_util.UTC)
+                elif isinstance(start, datetime):
+                    start_dt = dt_util.as_utc(start)
+                else:
+                    continue
+                day = start_dt.astimezone(tz).date()
+                target[day] = target.get(day, 0.0) + float(row.get("state") or 0.0)
+
+        for record in sorted_records:
+            day = record["start"].astimezone(tz).date()
+            day_kwh = daily_kwh.get(day, 0.0)
+            day_cost = daily_cost.get(day, 0.0)
+            if day_kwh > 0 and day_cost > 0:
+                record["cost"] = round(record["kwh"] * (day_cost / day_kwh), 4)
+
     async def async_record_return_statistics(
         self,
         records: list[dict[str, Any]],
@@ -561,6 +614,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         }
 
         if is_backfill:
+            await self._apply_historical_rates_to_return_records(sorted_records, tz)
             return await self._async_record_backfill_series(
                 sorted_records,
                 tz,
@@ -1031,6 +1085,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             elif reauth_res == "recaptcha_blocked":
                 raise HomeAssistantError(
                     "PSE&G companion login temporarily blocked by Google reCAPTCHA; please retry backfill later"
+                ) from auth_err
+            elif reauth_res == "companion_error":
+                raise HomeAssistantError(
+                    "PSE&G companion service returned a temporary error; please retry backfill in a moment"
                 ) from auth_err
             else:
                 self.auth_required = True

@@ -208,6 +208,48 @@ class TestSolarReturnStatistics(unittest.TestCase):
         self.assertEqual(comp_meta["statistic_id"], f"{DOMAIN}:electricity_return_compensation")
         self.assertEqual([s["sum"] for s in comp_stats], [0.0, 1.0])
 
+    def test_backfill_uses_historical_day_rate_when_cost_exists(self):
+        hass = MagicMock()
+        hass.config.time_zone = "America/New_York"
+
+        async def run_exec(func, *args):
+            return func(*args)
+
+        hass.async_add_executor_job = run_exec
+        coord = PsegDataUpdateCoordinator(hass, PsegClient(cookie="MM_SID=abc"), {})
+        t0 = datetime(2026, 10, 20, 4, tzinfo=timezone.utc)
+        records = [{"start": t0, "kwh": 10.0, "cost": 2.5}]
+
+        def fake_period(_hass, _start, _end, stat_ids, *_args):
+            if f"{DOMAIN}:electricity_consumption" in stat_ids:
+                return {
+                    f"{DOMAIN}:electricity_consumption": [{"start": t0, "state": 20.0}],
+                    f"{DOMAIN}:electricity_cost": [{"start": t0, "state": 3.0}],
+                }
+            return {
+                f"{DOMAIN}:electricity_return": [],
+                f"{DOMAIN}:electricity_return_compensation": [],
+            }
+
+        loop = asyncio.new_event_loop()
+        try:
+            with (
+                patch("custom_components.pseg.coordinator.dt_util.get_time_zone", create=True, return_value=timezone.utc),
+                patch("custom_components.pseg.coordinator.dt_util.as_utc", create=True, side_effect=lambda dt: dt.astimezone(timezone.utc)),
+                patch("custom_components.pseg.coordinator.dt_util.UTC", create=True, new=timezone.utc),
+                patch("custom_components.pseg.coordinator.StatisticData", side_effect=lambda **kw: kw),
+                patch("custom_components.pseg.coordinator.get_instance", return_value=hass),
+                patch("custom_components.pseg.coordinator.statistics_during_period", side_effect=fake_period),
+                patch("custom_components.pseg.coordinator.async_add_external_statistics") as add_stats,
+            ):
+                count = loop.run_until_complete(coord.async_record_return_statistics(records, is_backfill=True))
+        finally:
+            loop.close()
+
+        self.assertEqual(count, 1)
+        comp_stats = add_stats.call_args_list[1][0][2]
+        self.assertEqual([s["sum"] for s in comp_stats], [0.0, 1.5])
+
 
 if __name__ == "__main__":
     unittest.main()
