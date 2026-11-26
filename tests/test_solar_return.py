@@ -107,6 +107,7 @@ class TestSolarReturnStatistics(unittest.TestCase):
                 patch("custom_components.pseg.coordinator.dt_util.get_time_zone", create=True, return_value=timezone.utc),
                 patch("custom_components.pseg.coordinator.dt_util.as_utc", create=True, side_effect=lambda dt: dt.astimezone(timezone.utc)),
                 patch("custom_components.pseg.coordinator.dt_util.UTC", create=True, new=timezone.utc),
+                patch("custom_components.pseg.coordinator.StatisticData", side_effect=lambda **kw: kw),
                 patch("custom_components.pseg.coordinator.get_last_statistics", return_value={}),
                 patch("custom_components.pseg.coordinator.async_add_external_statistics") as add_stats,
             ):
