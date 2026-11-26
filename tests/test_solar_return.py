@@ -62,6 +62,13 @@ class TestSolarReturnParsing(unittest.TestCase):
         self.assertIs(sel_del, series[1])
         self.assertIs(sel_rec, series[2])
 
+    def test_all_zero_received_series_first_does_not_hide_delivered(self):
+        zero_received = {"name": "Meter #111", "data": [{"x": X0, "y": 0.0}]}
+        delivered = {"name": "Meter #111", "data": [{"x": X0, "y": 2.0}]}
+        sel_del, sel_rec = select_meter_series_pair([zero_received, delivered])
+        self.assertIs(sel_del, delivered)
+        self.assertEqual(sel_rec, {})
+
     def test_parse_chart_data_extracts_positive_return_hourly_records(self):
         client = PsegClient(cookie="MM_SID=abc", user_configured_rate=0.2)
         parsed = client._parse_chart_data(_solar_chart_payload())
@@ -245,6 +252,87 @@ class TestSolarReturnStatistics(unittest.TestCase):
                 patch("custom_components.pseg.coordinator.async_add_external_statistics") as add_stats,
             ):
                 count = loop.run_until_complete(coord.async_record_return_statistics(records, is_backfill=True))
+        finally:
+            loop.close()
+
+        self.assertEqual(count, 1)
+        comp_stats = add_stats.call_args_list[1][0][2]
+        self.assertEqual([s["sum"] for s in comp_stats], [0.0, 1.5])
+
+    def test_poll_skips_hourly_records_on_day_covered_by_daily_backfill(self):
+        hass = MagicMock()
+        hass.config.time_zone = "UTC"
+
+        async def run_exec(func, *args):
+            return func(*args)
+
+        hass.async_add_executor_job = run_exec
+        coord = PsegDataUpdateCoordinator(hass, PsegClient(cookie="MM_SID=abc"), {})
+        d_prev = datetime(2026, 10, 19, 0, tzinfo=timezone.utc)
+        d_backfill = datetime(2026, 10, 20, 0, tzinfo=timezone.utc)
+        h_same_day = datetime(2026, 10, 20, 13, tzinfo=timezone.utc)
+        h_next_day = datetime(2026, 10, 21, 1, tzinfo=timezone.utc)
+        records = [
+            {"start": h_same_day, "kwh": 2.0, "cost": 0.4},
+            {"start": h_next_day, "kwh": 3.0, "cost": 0.6},
+        ]
+
+        def fake_last_stats(_hass, _num, stat_id, *_args):
+            return {stat_id: [{"start": d_backfill, "sum": 10.0}, {"start": d_prev, "sum": 5.0}]}
+
+        loop = asyncio.new_event_loop()
+        try:
+            with (
+                patch("custom_components.pseg.coordinator.dt_util.get_time_zone", create=True, return_value=timezone.utc),
+                patch("custom_components.pseg.coordinator.dt_util.as_utc", create=True, side_effect=lambda dt: dt.astimezone(timezone.utc)),
+                patch("custom_components.pseg.coordinator.dt_util.UTC", create=True, new=timezone.utc),
+                patch("custom_components.pseg.coordinator.StatisticData", side_effect=lambda **kw: kw),
+                patch("custom_components.pseg.coordinator.get_instance", return_value=hass),
+                patch("custom_components.pseg.coordinator.get_last_statistics", side_effect=fake_last_stats),
+                patch("custom_components.pseg.coordinator.async_add_external_statistics") as add_stats,
+            ):
+                count = loop.run_until_complete(coord.async_record_return_statistics(records, is_backfill=False))
+        finally:
+            loop.close()
+
+        self.assertEqual(count, 1)
+        ret_stats = add_stats.call_args_list[0][0][2]
+        self.assertEqual([s["start"] for s in ret_stats], [h_next_day])
+        self.assertEqual([s["sum"] for s in ret_stats], [13.0])
+
+    def test_poll_seed_applies_historical_day_rate_to_compensation(self):
+        hass = MagicMock()
+        hass.config.time_zone = "UTC"
+
+        async def run_exec(func, *args):
+            return func(*args)
+
+        hass.async_add_executor_job = run_exec
+        coord = PsegDataUpdateCoordinator(hass, PsegClient(cookie="MM_SID=abc"), {})
+        t0 = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
+        records = [{"start": t0, "kwh": 10.0, "cost": 2.5}]
+
+        def fake_period(_hass, _start, _end, stat_ids, *_args):
+            if f"{DOMAIN}:electricity_consumption" in stat_ids:
+                return {
+                    f"{DOMAIN}:electricity_consumption": [{"start": t0, "state": 20.0}],
+                    f"{DOMAIN}:electricity_cost": [{"start": t0, "state": 3.0}],
+                }
+            return {}
+
+        loop = asyncio.new_event_loop()
+        try:
+            with (
+                patch("custom_components.pseg.coordinator.dt_util.get_time_zone", create=True, return_value=timezone.utc),
+                patch("custom_components.pseg.coordinator.dt_util.as_utc", create=True, side_effect=lambda dt: dt.astimezone(timezone.utc)),
+                patch("custom_components.pseg.coordinator.dt_util.UTC", create=True, new=timezone.utc),
+                patch("custom_components.pseg.coordinator.StatisticData", side_effect=lambda **kw: kw),
+                patch("custom_components.pseg.coordinator.get_instance", return_value=hass),
+                patch("custom_components.pseg.coordinator.get_last_statistics", return_value={}),
+                patch("custom_components.pseg.coordinator.statistics_during_period", side_effect=fake_period),
+                patch("custom_components.pseg.coordinator.async_add_external_statistics") as add_stats,
+            ):
+                count = loop.run_until_complete(coord.async_record_return_statistics(records, is_backfill=False))
         finally:
             loop.close()
 

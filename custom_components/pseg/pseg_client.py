@@ -120,8 +120,11 @@ def select_meter_series_pair(series_list: list[dict[str, Any]]) -> tuple[dict[st
 
     for name, entries in grouped.items():
         delivered = next(
-            (m for m, vals in entries if all(v >= 0 for v in vals)),
-            entries[0][0],
+            (m for m, vals in entries if all(v >= 0 for v in vals) and any(v > 0 for v in vals)),
+            next(
+                (m for m, vals in entries if all(v >= 0 for v in vals)),
+                entries[0][0],
+            ),
         )
         received = next(
             (m for m, vals in entries if m is not delivered and all(v <= 0 for v in vals) and any(v < 0 for v in vals)),

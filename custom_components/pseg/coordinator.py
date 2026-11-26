@@ -576,6 +576,53 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             if day_kwh > 0 and day_cost > 0:
                 record["cost"] = round(record["kwh"] * (day_cost / day_kwh), 4)
 
+    async def _query_last_stat(
+        self,
+        stat_id: str,
+        tz: Any,
+    ) -> tuple[Optional[datetime], float, Optional[date]]:
+        """Return (last_start_dt, last_sum, skip_daily_date) for incremental poll appends.
+
+        If the newest stored row is a daily backfill row (at local midnight with >=23h
+        spacing from its predecessor), return its local date so subsequent hourly polls
+        do not double-count that day.
+        """
+        def _parse_start(val: Any) -> Optional[datetime]:
+            if isinstance(val, (int, float)):
+                return datetime.fromtimestamp(val, tz=dt_util.UTC)
+            if isinstance(val, datetime):
+                return dt_util.as_utc(val)
+            return None
+
+        try:
+            last_stats = await get_instance(self.hass).async_add_executor_job(
+                get_last_statistics,
+                self.hass,
+                2,
+                stat_id,
+                True,
+                {"sum", "start"},
+            )
+            rows = last_stats.get(stat_id) or []
+            if rows:
+                newest_start = _parse_start(rows[0].get("start"))
+                last_sum = float(rows[0].get("sum") or 0.0)
+                skip_date: Optional[date] = None
+                if newest_start is not None and len(rows) >= 2:
+                    prev_start = _parse_start(rows[1].get("start"))
+                    local_newest = newest_start.astimezone(tz)
+                    if (
+                        prev_start is not None
+                        and local_newest.hour == 0
+                        and local_newest.minute == 0
+                        and (newest_start - prev_start) >= timedelta(hours=23)
+                    ):
+                        skip_date = local_newest.date()
+                return newest_start, last_sum, skip_date
+        except Exception as err:
+            _LOGGER.debug("Could not query last statistic for %s: %s", stat_id, err)
+        return None, 0.0, None
+
     async def async_record_return_statistics(
         self,
         records: list[dict[str, Any]],
@@ -621,32 +668,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 [(return_id, "kwh", return_meta), (comp_id, "cost", comp_meta)],
             )
 
-        async def _query_last_stat(stat_id: str) -> tuple[Optional[datetime], float]:
-            try:
-                last_stats = await get_instance(self.hass).async_add_executor_job(
-                    get_last_statistics,
-                    self.hass,
-                    1,
-                    stat_id,
-                    True,
-                    {"sum", "start"},
-                )
-                if stat_id in last_stats and last_stats[stat_id]:
-                    last_stat = last_stats[stat_id][0]
-                    stat_start = last_stat.get("start")
-                    start_dt: Optional[datetime] = None
-                    if isinstance(stat_start, (int, float)):
-                        start_dt = datetime.fromtimestamp(stat_start, tz=dt_util.UTC)
-                    elif isinstance(stat_start, datetime):
-                        start_dt = dt_util.as_utc(stat_start)
-                    return start_dt, float(last_stat.get("sum") or 0.0)
-            except Exception as err:
-                _LOGGER.debug("Could not query last statistic for %s: %s", stat_id, err)
-            return None, 0.0
-
         def _build_series_stats(
             last_start_dt: Optional[datetime],
             last_sum: float,
+            skip_daily_date: Optional[date],
             value_key: str,
         ) -> tuple[list[StatisticData], int]:
             stats: list[StatisticData] = []
@@ -660,7 +685,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 running = 0.0
                 to_process = sorted_records
             else:
-                to_process = [r for r in sorted_records if r["start"] > last_start_dt]
+                to_process = [
+                    r
+                    for r in sorted_records
+                    if r["start"] > last_start_dt
+                    and (skip_daily_date is None or r["start"].astimezone(tz).date() > skip_daily_date)
+                ]
                 running = last_sum
 
             if not to_process and len(stats) <= 1:
@@ -673,10 +703,18 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 )
             return stats, len(to_process)
 
+        return_last = await self._query_last_stat(return_id, tz)
+        comp_last = await self._query_last_stat(comp_id, tz)
+        if comp_last[0] is None:
+            await self._apply_historical_rates_to_return_records(sorted_records, tz)
+
         inserted_max = 0
-        for stat_id, value_key, meta in ((return_id, "kwh", return_meta), (comp_id, "cost", comp_meta)):
-            last_start_dt, last_sum = await _query_last_stat(stat_id)
-            stats, count = _build_series_stats(last_start_dt, last_sum, value_key)
+        for stat_id, value_key, meta, last_info in (
+            (return_id, "kwh", return_meta, return_last),
+            (comp_id, "cost", comp_meta, comp_last),
+        ):
+            last_start_dt, last_sum, skip_daily_date = last_info
+            stats, count = _build_series_stats(last_start_dt, last_sum, skip_daily_date, value_key)
             if stats:
                 async_add_external_statistics(self.hass, meta, stats)
                 _LOGGER.info(
@@ -761,44 +799,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             )
 
         # Check existing external statistics in Home Assistant
-        last_stat_start_dt: Optional[datetime] = None
-        last_consumption_sum = 0.0
-        last_cost_sum = 0.0
-
-        try:
-            last_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics,
-                self.hass,
-                1,
-                consumption_id,
-                True,
-                {"sum", "start"},
-            )
-            if consumption_id in last_stats and last_stats[consumption_id]:
-                last_stat = last_stats[consumption_id][0]
-                stat_start = last_stat.get("start")
-                if isinstance(stat_start, (int, float)):
-                    last_stat_start_dt = datetime.fromtimestamp(stat_start, tz=dt_util.UTC)
-                elif isinstance(stat_start, datetime):
-                    last_stat_start_dt = dt_util.as_utc(stat_start)
-                last_consumption_sum = float(last_stat.get("sum") or 0.0)
-        except Exception as err:
-            _LOGGER.debug("Could not query last consumption statistic: %s", err)
-
-        try:
-            last_cost_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics,
-                self.hass,
-                1,
-                cost_id,
-                True,
-                {"sum", "start"},
-            )
-            if cost_id in last_cost_stats and last_cost_stats[cost_id]:
-                last_cost_stat = last_cost_stats[cost_id][0]
-                last_cost_sum = float(last_cost_stat.get("sum") or 0.0)
-        except Exception as err:
-            _LOGGER.debug("Could not query last cost statistic: %s", err)
+        last_stat_start_dt, last_consumption_sum, skip_daily_date = await self._query_last_stat(consumption_id, tz)
+        _, last_cost_sum, _ = await self._query_last_stat(cost_id, tz)
 
         consumption_stats: list[StatisticData] = []
         cost_stats: list[StatisticData] = []
@@ -832,7 +834,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             records_to_process = sorted_records
         else:
             # Incremental append: strictly process records newer than the latest recorded statistic
-            records_to_process = [r for r in sorted_records if r["start"] > last_stat_start_dt]
+            records_to_process = [
+                r
+                for r in sorted_records
+                if r["start"] > last_stat_start_dt
+                and (skip_daily_date is None or r["start"].astimezone(tz).date() > skip_daily_date)
+            ]
             running_consumption = last_consumption_sum
             running_cost = last_cost_sum
 
