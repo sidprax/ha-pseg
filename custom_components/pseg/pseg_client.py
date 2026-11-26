@@ -433,6 +433,7 @@ class PsegClient:
                         if value is None:
                             continue
                         return_kwh = abs(round(value, 4))
+                        return_cost = round(return_kwh * self.effective_rate, 4)
                         hs = pt.get("hs", {})
                         p_start = hs.get("start", "")
                         try:
@@ -445,6 +446,7 @@ class PsegClient:
                         start_utc = portal_time_to_utc(x) if x else None
                         if date_iso in records_map:
                             records_map[date_iso]["return_kwh"] = return_kwh
+                            records_map[date_iso]["return_cost"] = return_cost
                         else:
                             records_map[date_iso] = {
                                 "date": date_iso,
@@ -452,6 +454,7 @@ class PsegClient:
                                 "kwh": 0.0,
                                 "cost": 0.0,
                                 "return_kwh": return_kwh,
+                                "return_cost": return_cost,
                             }
 
             curr_start = curr_end + timedelta(days=1)
@@ -638,6 +641,7 @@ class PsegClient:
                 "start": p["start"],
                 "date": p["date"],
                 "kwh": p["kwh"],
+                "cost": round(p["kwh"] * effective_rate, 4),
             }
             for p in parsed_return_pts
         ]

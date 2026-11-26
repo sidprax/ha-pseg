@@ -529,7 +529,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         records: list[dict[str, Any]],
         is_backfill: bool = False,
     ) -> int:
-        """Import grid-return (solar export) energy statistics into LTS."""
+        """Import grid-return (solar export) energy and compensation statistics into LTS."""
         if not records:
             return 0
 
@@ -539,6 +539,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             return 0
 
         return_id = f"{DOMAIN}:electricity_return"
+        comp_id = f"{DOMAIN}:electricity_return_compensation"
         return_meta: StatisticMetaData = {
             "has_mean": False,
             "has_sum": True,
@@ -549,16 +550,27 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             "statistic_id": return_id,
             "unit_of_measurement": "kWh",
         }
+        comp_meta: StatisticMetaData = {
+            "has_mean": False,
+            "has_sum": True,
+            "mean_type": 0,
+            "unit_class": None,
+            "name": "PSE&G Electricity Return Compensation",
+            "source": DOMAIN,
+            "statistic_id": comp_id,
+            "unit_of_measurement": "USD",
+        }
 
         if is_backfill:
             return await self._async_record_backfill_series(
                 sorted_records,
                 tz,
-                [(return_id, "kwh", return_meta)],
+                [(return_id, "kwh", return_meta), (comp_id, "cost", comp_meta)],
             )
 
         last_stat_start_dt: Optional[datetime] = None
         last_return_sum = 0.0
+        last_comp_sum = 0.0
         try:
             last_stats = await get_instance(self.hass).async_add_executor_job(
                 get_last_statistics,
@@ -579,33 +591,58 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         except Exception as err:
             _LOGGER.debug("Could not query last return statistic: %s", err)
 
+        try:
+            last_comp_stats = await get_instance(self.hass).async_add_executor_job(
+                get_last_statistics,
+                self.hass,
+                1,
+                comp_id,
+                True,
+                {"sum", "start"},
+            )
+            if comp_id in last_comp_stats and last_comp_stats[comp_id]:
+                last_comp_sum = float(last_comp_stats[comp_id][0].get("sum") or 0.0)
+        except Exception as err:
+            _LOGGER.debug("Could not query last return compensation statistic: %s", err)
+
         return_stats: list[StatisticData] = []
+        comp_stats: list[StatisticData] = []
         if last_stat_start_dt is None:
             first_start = sorted_records[0]["start"]
             step = timedelta(hours=1)
             if len(sorted_records) > 1 and (sorted_records[1]["start"] - sorted_records[0]["start"]) >= timedelta(days=1):
                 step = timedelta(days=1)
-            return_stats.append(StatisticData(start=first_start - step, state=0.0, sum=0.0))
+            baseline_dt = first_start - step
+            return_stats.append(StatisticData(start=baseline_dt, state=0.0, sum=0.0))
+            comp_stats.append(StatisticData(start=baseline_dt, state=0.0, sum=0.0))
             running_return = 0.0
+            running_comp = 0.0
             records_to_process = sorted_records
         else:
             records_to_process = [r for r in sorted_records if r["start"] > last_stat_start_dt]
             running_return = last_return_sum
+            running_comp = last_comp_sum
 
         if not records_to_process and len(return_stats) <= 1:
             return 0
 
         for r in records_to_process:
             running_return += r["kwh"]
+            running_comp += r["cost"]
             return_stats.append(
                 StatisticData(start=r["start"], state=r["kwh"], sum=round(running_return, 4))
             )
+            comp_stats.append(
+                StatisticData(start=r["start"], state=r["cost"], sum=round(running_comp, 4))
+            )
 
         async_add_external_statistics(self.hass, return_meta, return_stats)
+        async_add_external_statistics(self.hass, comp_meta, comp_stats)
         _LOGGER.info(
-            "Added %d return statistics into LTS for %s (%s to %s)",
+            "Added %d return statistics into LTS for %s and %s (%s to %s)",
             len(return_stats),
             return_id,
+            comp_id,
             return_stats[0]["start"].isoformat(),
             return_stats[-1]["start"].isoformat(),
         )
@@ -1031,7 +1068,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         inserted_count = await self.async_record_statistics(records, is_backfill=True)
 
         return_records = [
-            {"date": r["date"], "start": r.get("start"), "kwh": r["return_kwh"]}
+            {
+                "date": r["date"],
+                "start": r.get("start"),
+                "kwh": r["return_kwh"],
+                "cost": r.get("return_cost", 0.0),
+            }
             for r in records
             if "return_kwh" in r
         ]

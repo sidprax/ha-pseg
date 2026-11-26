@@ -63,23 +63,29 @@ class TestSolarReturnParsing(unittest.TestCase):
         self.assertIs(sel_rec, series[2])
 
     def test_parse_chart_data_extracts_positive_return_hourly_records(self):
-        client = PsegClient(cookie="MM_SID=abc")
+        client = PsegClient(cookie="MM_SID=abc", user_configured_rate=0.2)
         parsed = client._parse_chart_data(_solar_chart_payload())
         self.assertEqual([r["kwh"] for r in parsed["hourly_records"]], [1.25, 0.0])
         self.assertEqual([r["kwh"] for r in parsed["return_hourly_records"]], [0.0, 2.5])
+        self.assertEqual([r["cost"] for r in parsed["return_hourly_records"]], [0.0, 0.5])
 
     def test_fetch_history_range_records_return_kwh(self):
-        client = PsegClient(cookie="MM_SID=abc")
+        client = PsegClient(cookie="MM_SID=abc", user_configured_rate=0.2)
         client.session = MagicMock()
-        client.session.get.return_value.json.return_value = _solar_chart_payload()
+        post_resp = MagicMock(status_code=200, is_redirect=False, url="https://mysmartenergy.nj.pseg.com/Dashboard/Chart")
+        get_resp = MagicMock(status_code=200, is_redirect=False, url="https://mysmartenergy.nj.pseg.com/Dashboard/ChartData")
+        get_resp.json.return_value = _solar_chart_payload()
+        client.session.post.return_value = post_resp
+        client.session.get.return_value = get_resp
         with patch.object(client, "_get_verification_token", return_value="tok"):
             records = client.fetch_history_range("2026-10-20", "2026-10-20")
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["return_kwh"], 2.5)
+        self.assertEqual(records[0]["return_cost"], 0.5)
 
 
 class TestSolarReturnStatistics(unittest.TestCase):
-    """Test pseg:electricity_return LTS recording."""
+    """Test pseg:electricity_return and pseg:electricity_return_compensation LTS recording."""
 
     def test_records_return_statistics_with_anchor_and_sum(self):
         hass = MagicMock()
@@ -91,13 +97,14 @@ class TestSolarReturnStatistics(unittest.TestCase):
         hass.async_add_executor_job = run_exec
         coord = PsegDataUpdateCoordinator(hass, PsegClient(cookie="MM_SID=abc"), {})
         records = [
-            {"start": datetime(2026, 10, 20, 12, tzinfo=timezone.utc), "kwh": 0.0},
-            {"start": datetime(2026, 10, 20, 13, tzinfo=timezone.utc), "kwh": 2.5},
+            {"start": datetime(2026, 10, 20, 12, tzinfo=timezone.utc), "kwh": 0.0, "cost": 0.0},
+            {"start": datetime(2026, 10, 20, 13, tzinfo=timezone.utc), "kwh": 2.5, "cost": 0.5},
         ]
 
         loop = asyncio.new_event_loop()
         try:
             with (
+                patch("custom_components.pseg.coordinator.dt_util.get_time_zone", create=True, return_value=timezone.utc),
                 patch("custom_components.pseg.coordinator.get_last_statistics", return_value={}),
                 patch("custom_components.pseg.coordinator.async_add_external_statistics") as add_stats,
             ):
@@ -106,12 +113,15 @@ class TestSolarReturnStatistics(unittest.TestCase):
             loop.close()
 
         self.assertEqual(count, 2)
-        add_stats.assert_called_once()
-        meta = add_stats.call_args[0][1]
-        stats = add_stats.call_args[0][2]
-        self.assertEqual(meta["statistic_id"], f"{DOMAIN}:electricity_return")
-        self.assertEqual(meta["unit_of_measurement"], "kWh")
-        self.assertEqual([s["sum"] for s in stats], [0.0, 0.0, 2.5])
+        self.assertEqual(add_stats.call_count, 2)
+        return_meta, return_stats = add_stats.call_args_list[0][0][1], add_stats.call_args_list[0][0][2]
+        comp_meta, comp_stats = add_stats.call_args_list[1][0][1], add_stats.call_args_list[1][0][2]
+        self.assertEqual(return_meta["statistic_id"], f"{DOMAIN}:electricity_return")
+        self.assertEqual(return_meta["unit_of_measurement"], "kWh")
+        self.assertEqual([s["sum"] for s in return_stats], [0.0, 0.0, 2.5])
+        self.assertEqual(comp_meta["statistic_id"], f"{DOMAIN}:electricity_return_compensation")
+        self.assertEqual(comp_meta["unit_of_measurement"], "USD")
+        self.assertEqual([s["sum"] for s in comp_stats], [0.0, 0.0, 0.5])
 
 
 if __name__ == "__main__":

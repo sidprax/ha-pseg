@@ -138,7 +138,11 @@ The integration natively publishes official Home Assistant External Statistics f
 4. Select **Track costs for this energy consumption** > **Use an entity with total energy costs** and select **PSE&G Electricity Cost** (`pseg:electricity_cost`).
 5. Click **Save**.
 
-The Energy Dashboard will automatically display your electric usage and actual billing costs with hourly resolution for recent days and daily trends across the full backfill range.
+For **net-metered solar** accounts, the integration also publishes grid export statistics automatically when returned energy is detected:
+- Under **Return to grid**, select **PSE&G Electricity Returned** (`pseg:electricity_return`).
+- Under **Use a statistic tracking the total compensation**, select **PSE&G Electricity Return Compensation** (`pseg:electricity_return_compensation`).
+
+The Energy Dashboard will automatically display your electric usage (and solar grid export, if applicable) with hourly resolution for the last ~14 days and daily trends across the historical backfill range.
 
 ## Historical Backfill
 
