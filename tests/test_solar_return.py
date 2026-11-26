@@ -126,6 +126,85 @@ class TestSolarReturnStatistics(unittest.TestCase):
         self.assertEqual(comp_meta["unit_of_measurement"], "USD")
         self.assertEqual([s["sum"] for s in comp_stats], [0.0, 0.0, 0.5])
 
+    def test_poll_seeds_compensation_when_return_already_exists(self):
+        hass = MagicMock()
+        hass.config.time_zone = "America/New_York"
+
+        async def run_exec(func, *args):
+            return func(*args)
+
+        hass.async_add_executor_job = run_exec
+        coord = PsegDataUpdateCoordinator(hass, PsegClient(cookie="MM_SID=abc"), {})
+        t0 = datetime(2026, 10, 20, 12, tzinfo=timezone.utc)
+        t1 = datetime(2026, 10, 20, 13, tzinfo=timezone.utc)
+        records = [
+            {"start": t0, "kwh": 1.0, "cost": 0.2},
+            {"start": t1, "kwh": 2.5, "cost": 0.5},
+        ]
+
+        def fake_last_stats(_hass, _num, stat_id, *_args):
+            if stat_id == f"{DOMAIN}:electricity_return":
+                return {stat_id: [{"start": t1, "sum": 3.5}]}
+            return {}
+
+        loop = asyncio.new_event_loop()
+        try:
+            with (
+                patch("custom_components.pseg.coordinator.dt_util.get_time_zone", create=True, return_value=timezone.utc),
+                patch("custom_components.pseg.coordinator.dt_util.as_utc", create=True, side_effect=lambda dt: dt.astimezone(timezone.utc)),
+                patch("custom_components.pseg.coordinator.dt_util.UTC", create=True, new=timezone.utc),
+                patch("custom_components.pseg.coordinator.StatisticData", side_effect=lambda **kw: kw),
+                patch("custom_components.pseg.coordinator.get_last_statistics", side_effect=fake_last_stats),
+                patch("custom_components.pseg.coordinator.async_add_external_statistics") as add_stats,
+            ):
+                count = loop.run_until_complete(coord.async_record_return_statistics(records, is_backfill=False))
+        finally:
+            loop.close()
+
+        self.assertEqual(count, 2)
+        add_stats.assert_called_once()
+        comp_meta, comp_stats = add_stats.call_args[0][1], add_stats.call_args[0][2]
+        self.assertEqual(comp_meta["statistic_id"], f"{DOMAIN}:electricity_return_compensation")
+        self.assertEqual([s["sum"] for s in comp_stats], [0.0, 0.2, 0.7])
+
+    def test_backfill_populates_compensation_when_return_already_exists(self):
+        hass = MagicMock()
+        hass.config.time_zone = "America/New_York"
+
+        async def run_exec(func, *args):
+            return func(*args)
+
+        hass.async_add_executor_job = run_exec
+        coord = PsegDataUpdateCoordinator(hass, PsegClient(cookie="MM_SID=abc"), {})
+        t0 = datetime(2026, 10, 20, 4, tzinfo=timezone.utc)
+        records = [{"start": t0, "kwh": 5.0, "cost": 1.0}]
+
+        def fake_period(*_args):
+            return {
+                f"{DOMAIN}:electricity_return": [{"start": t0, "state": 5.0, "sum": 5.0}],
+                f"{DOMAIN}:electricity_return_compensation": [],
+            }
+
+        loop = asyncio.new_event_loop()
+        try:
+            with (
+                patch("custom_components.pseg.coordinator.dt_util.get_time_zone", create=True, return_value=timezone.utc),
+                patch("custom_components.pseg.coordinator.dt_util.as_utc", create=True, side_effect=lambda dt: dt.astimezone(timezone.utc)),
+                patch("custom_components.pseg.coordinator.dt_util.UTC", create=True, new=timezone.utc),
+                patch("custom_components.pseg.coordinator.StatisticData", side_effect=lambda **kw: kw),
+                patch("custom_components.pseg.coordinator.statistics_during_period", side_effect=fake_period),
+                patch("custom_components.pseg.coordinator.async_add_external_statistics") as add_stats,
+            ):
+                count = loop.run_until_complete(coord.async_record_return_statistics(records, is_backfill=True))
+        finally:
+            loop.close()
+
+        self.assertEqual(count, 1)
+        add_stats.assert_called_once()
+        comp_meta, comp_stats = add_stats.call_args[0][1], add_stats.call_args[0][2]
+        self.assertEqual(comp_meta["statistic_id"], f"{DOMAIN}:electricity_return_compensation")
+        self.assertEqual([s["sum"] for s in comp_stats], [0.0, 1.0])
+
 
 if __name__ == "__main__":
     unittest.main()

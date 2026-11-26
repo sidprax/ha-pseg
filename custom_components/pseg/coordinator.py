@@ -568,85 +568,73 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 [(return_id, "kwh", return_meta), (comp_id, "cost", comp_meta)],
             )
 
-        last_stat_start_dt: Optional[datetime] = None
-        last_return_sum = 0.0
-        last_comp_sum = 0.0
-        try:
-            last_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics,
-                self.hass,
-                1,
-                return_id,
-                True,
-                {"sum", "start"},
-            )
-            if return_id in last_stats and last_stats[return_id]:
-                last_stat = last_stats[return_id][0]
-                stat_start = last_stat.get("start")
-                if isinstance(stat_start, (int, float)):
-                    last_stat_start_dt = datetime.fromtimestamp(stat_start, tz=dt_util.UTC)
-                elif isinstance(stat_start, datetime):
-                    last_stat_start_dt = dt_util.as_utc(stat_start)
-                last_return_sum = float(last_stat.get("sum") or 0.0)
-        except Exception as err:
-            _LOGGER.debug("Could not query last return statistic: %s", err)
+        async def _query_last_stat(stat_id: str) -> tuple[Optional[datetime], float]:
+            try:
+                last_stats = await get_instance(self.hass).async_add_executor_job(
+                    get_last_statistics,
+                    self.hass,
+                    1,
+                    stat_id,
+                    True,
+                    {"sum", "start"},
+                )
+                if stat_id in last_stats and last_stats[stat_id]:
+                    last_stat = last_stats[stat_id][0]
+                    stat_start = last_stat.get("start")
+                    start_dt: Optional[datetime] = None
+                    if isinstance(stat_start, (int, float)):
+                        start_dt = datetime.fromtimestamp(stat_start, tz=dt_util.UTC)
+                    elif isinstance(stat_start, datetime):
+                        start_dt = dt_util.as_utc(stat_start)
+                    return start_dt, float(last_stat.get("sum") or 0.0)
+            except Exception as err:
+                _LOGGER.debug("Could not query last statistic for %s: %s", stat_id, err)
+            return None, 0.0
 
-        try:
-            last_comp_stats = await get_instance(self.hass).async_add_executor_job(
-                get_last_statistics,
-                self.hass,
-                1,
-                comp_id,
-                True,
-                {"sum", "start"},
-            )
-            if comp_id in last_comp_stats and last_comp_stats[comp_id]:
-                last_comp_sum = float(last_comp_stats[comp_id][0].get("sum") or 0.0)
-        except Exception as err:
-            _LOGGER.debug("Could not query last return compensation statistic: %s", err)
+        def _build_series_stats(
+            last_start_dt: Optional[datetime],
+            last_sum: float,
+            value_key: str,
+        ) -> tuple[list[StatisticData], int]:
+            stats: list[StatisticData] = []
+            if last_start_dt is None:
+                first_start = sorted_records[0]["start"]
+                step = timedelta(hours=1)
+                if len(sorted_records) > 1 and (sorted_records[1]["start"] - sorted_records[0]["start"]) >= timedelta(days=1):
+                    step = timedelta(days=1)
+                baseline_dt = first_start - step
+                stats.append(StatisticData(start=baseline_dt, state=0.0, sum=0.0))
+                running = 0.0
+                to_process = sorted_records
+            else:
+                to_process = [r for r in sorted_records if r["start"] > last_start_dt]
+                running = last_sum
 
-        return_stats: list[StatisticData] = []
-        comp_stats: list[StatisticData] = []
-        if last_stat_start_dt is None:
-            first_start = sorted_records[0]["start"]
-            step = timedelta(hours=1)
-            if len(sorted_records) > 1 and (sorted_records[1]["start"] - sorted_records[0]["start"]) >= timedelta(days=1):
-                step = timedelta(days=1)
-            baseline_dt = first_start - step
-            return_stats.append(StatisticData(start=baseline_dt, state=0.0, sum=0.0))
-            comp_stats.append(StatisticData(start=baseline_dt, state=0.0, sum=0.0))
-            running_return = 0.0
-            running_comp = 0.0
-            records_to_process = sorted_records
-        else:
-            records_to_process = [r for r in sorted_records if r["start"] > last_stat_start_dt]
-            running_return = last_return_sum
-            running_comp = last_comp_sum
+            if not to_process and len(stats) <= 1:
+                return [], 0
 
-        if not records_to_process and len(return_stats) <= 1:
-            return 0
+            for r in to_process:
+                running += r[value_key]
+                stats.append(
+                    StatisticData(start=r["start"], state=r[value_key], sum=round(running, 4))
+                )
+            return stats, len(to_process)
 
-        for r in records_to_process:
-            running_return += r["kwh"]
-            running_comp += r["cost"]
-            return_stats.append(
-                StatisticData(start=r["start"], state=r["kwh"], sum=round(running_return, 4))
-            )
-            comp_stats.append(
-                StatisticData(start=r["start"], state=r["cost"], sum=round(running_comp, 4))
-            )
-
-        async_add_external_statistics(self.hass, return_meta, return_stats)
-        async_add_external_statistics(self.hass, comp_meta, comp_stats)
-        _LOGGER.info(
-            "Added %d return statistics into LTS for %s and %s (%s to %s)",
-            len(return_stats),
-            return_id,
-            comp_id,
-            return_stats[0]["start"].isoformat(),
-            return_stats[-1]["start"].isoformat(),
-        )
-        return len(records_to_process)
+        inserted_max = 0
+        for stat_id, value_key, meta in ((return_id, "kwh", return_meta), (comp_id, "cost", comp_meta)):
+            last_start_dt, last_sum = await _query_last_stat(stat_id)
+            stats, count = _build_series_stats(last_start_dt, last_sum, value_key)
+            if stats:
+                async_add_external_statistics(self.hass, meta, stats)
+                _LOGGER.info(
+                    "Added %d return statistics into LTS for %s (%s to %s)",
+                    len(stats),
+                    stat_id,
+                    stats[0]["start"].isoformat(),
+                    stats[-1]["start"].isoformat(),
+                )
+                inserted_max = max(inserted_max, count)
+        return inserted_max
 
     async def async_record_statistics(
         self,
@@ -878,12 +866,13 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 raise TypeError("Recorder returned an invalid statistics result")
 
             existing_by_id: dict[str, list[dict[str, Any]]] = {}
-            existing_days: set[date] = set()
+            existing_days_by_id: dict[str, set[date]] = {}
             for statistic_id in stat_ids:
                 rows = existing.get(statistic_id, [])
                 if not isinstance(rows, list):
                     raise TypeError(f"Recorder returned invalid rows for {statistic_id}")
                 normalized_rows = []
+                stat_days: set[date] = set()
                 for row in rows:
                     start = row["start"]
                     if isinstance(start, (int, float)):
@@ -900,8 +889,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                         }
                     )
                     if float(row["state"]) != 0:
-                        existing_days.add(start.astimezone(tz).date())
+                        stat_days.add(start.astimezone(tz).date())
                 existing_by_id[statistic_id] = normalized_rows
+                existing_days_by_id[statistic_id] = stat_days
         except Exception as err:
             _LOGGER.error(
                 "Could not read existing PSE&G statistics; backfill was not recorded: %s",
@@ -911,27 +901,21 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 "Could not read existing PSE&G statistics; backfill was not recorded."
             ) from err
 
-        records_to_insert = [
-            record
-            for record in records
-            if record["start"].astimezone(tz).date() not in existing_days
-        ]
-        if not records_to_insert:
-            _LOGGER.debug("Backfill contains no days without existing statistics")
-            return 0
-
-        first_insert = records_to_insert[0]["start"]
-        first_insert_day = first_insert.astimezone(tz).date()
-        anchor_start = dt_util.as_utc(
-            datetime.combine(
-                first_insert_day - timedelta(days=1),
-                time.min,
-                tzinfo=tz,
-            )
-        )
-
-        def rechain(statistic_id: str, key: str) -> list[StatisticData]:
+        def rechain_for_stat(
+            statistic_id: str,
+            key: str,
+            records_to_insert: list[dict[str, Any]],
+        ) -> list[StatisticData]:
             """Keep existing interval amounts and rebuild sums after the insert point."""
+            first_insert = records_to_insert[0]["start"]
+            first_insert_day = first_insert.astimezone(tz).date()
+            anchor_start = dt_util.as_utc(
+                datetime.combine(
+                    first_insert_day - timedelta(days=1),
+                    time.min,
+                    tzinfo=tz,
+                )
+            )
             rows = existing_by_id[statistic_id]
             prior_rows = [row for row in rows if row["start"] < first_insert]
             running = (
@@ -968,10 +952,21 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 )
             return output
 
+        inserted_max = 0
         for stat_id, key, meta in series_specs:
-            stats = rechain(stat_id, key)
+            stat_existing_days = existing_days_by_id[stat_id]
+            records_to_insert = [
+                record
+                for record in records
+                if record["start"].astimezone(tz).date() not in stat_existing_days
+            ]
+            if not records_to_insert:
+                _LOGGER.debug("Backfill contains no days without existing statistics for %s", stat_id)
+                continue
+            stats = rechain_for_stat(stat_id, key, records_to_insert)
             async_add_external_statistics(self.hass, meta, stats)
-        return len(records_to_insert)
+            inserted_max = max(inserted_max, len(records_to_insert))
+        return inserted_max
 
     async def async_backfill_history(
         self,
