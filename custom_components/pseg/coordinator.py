@@ -153,6 +153,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             self.hass,
             notification_id=f"pseg_reauth_{self.config_entry.entry_id}",
         )
+        # Remove the custom repair left by older versions.
         ir.async_delete_issue(
             self.hass,
             DOMAIN,
@@ -160,8 +161,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         )
 
     def _raise_auth_issues(self, err_msg: str, addon_offline: bool = False) -> None:
-        """Raise persistent notification and repairs issue when authentication is required."""
+        """Raise a persistent notification when authentication is required."""
         entry_id = self.config_entry.entry_id if self.config_entry else "default"
+        integration_page = "[Settings > Devices & Services > PSE&G](/config/integrations/integration/pseg)"
         is_cookie_mode = (
             self.entry_data.get(CONF_AUTH_TYPE) == AUTH_TYPE_COOKIE
             or not self.entry_data.get(CONF_USERNAME)
@@ -169,18 +171,20 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         if is_cookie_mode:
             msg = (
                 "Your PSE&G browser cookie has expired. "
-                "Please go to **Settings > Devices & Services > PSE&G** and click **Reconfigure** to update your cookie."
+                f"Go to {integration_page}, click **Reconfigure**, and update your cookie."
             )
         elif addon_offline:
             msg = (
                 "Your PSE&G session has expired and the companion service is not reachable. "
-                "Please verify the companion add-on or Docker container is running, or go to "
-                "**Settings > Devices & Services > PSE&G** and click **Reconfigure** to authenticate with a Browser Session Cookie."
+                "Please verify the companion add-on or Docker container is running, or "
+                f"go to {integration_page}, click **Reconfigure**, and use a Browser Session Cookie."
             )
         else:
-            msg = (
-                "Your PSE&G session has expired and requires two-factor verification. "
-                "Please go to **Settings > Devices & Services > PSE&G** and click **Reconfigure** to complete sign-in."
+            msg = "Your PSE&G session has expired."
+            if self.entry_data.get(CONF_AUTH_TYPE) == AUTH_TYPE_OKTA:
+                msg += " Sign-in may require two-factor verification."
+            msg += (
+                f" Go to {integration_page} and click **Reconfigure** to complete sign-in."
             )
         persistent_notification.async_create(
             self.hass,
@@ -188,17 +192,6 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             message=msg,
             notification_id=f"pseg_reauth_{entry_id}",
         )
-        if self.config_entry:
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                f"reauth_required_{entry_id}",
-                is_fixable=True,
-                is_persistent=False,
-                severity=ir.IssueSeverity.ERROR,
-                translation_key="reauth_required",
-                data={"entry_id": entry_id},
-            )
 
     async def async_reauthenticate(self) -> ReauthStatus:
         """Attempt silent re-authentication with credentials via companion add-on."""
@@ -862,6 +855,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 )
             elif reauth_res == "skipped_cooldown":
                 raise HomeAssistantError("PSE&G re-authentication cooldown active; please retry backfill in a moment") from auth_err
+            elif reauth_res == "recaptcha_blocked":
+                raise HomeAssistantError(
+                    "PSE&G companion login temporarily blocked by Google reCAPTCHA; please retry backfill later"
+                ) from auth_err
             else:
                 self.auth_required = True
                 self.status = "auth_required"
@@ -871,6 +868,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 )
                 addon_offline = not getattr(self, "_addon_connected", False) if not is_cookie_mode else False
                 self._raise_auth_issues(str(auth_err), addon_offline=addon_offline)
+                if self.config_entry:
+                    self.config_entry.async_start_reauth(self.hass)
                 if is_cookie_mode:
                     raise HomeAssistantError(
                         "PSE&G session cookie has expired. Please re-authenticate under Settings > Devices & Services > PSE&G > Reconfigure."
