@@ -101,7 +101,6 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self.client = client
         self.entry_data = entry_data
         self.config_entry = config_entry
-        self.current_options: dict[str, Any] = dict(config_entry.options) if config_entry else {}
         self.next_update_time: Optional[datetime] = None
         self._last_valid_data: Optional[Dict[str, Any]] = None
         self.auth_required: bool = False

@@ -85,6 +85,17 @@ sys.modules["homeassistant.components"].persistent_notification = sys.modules["h
 sys.modules["homeassistant"].exceptions = sys.modules["homeassistant.exceptions"]
 
 # Configure specific stubs
+class FakeOptionsFlow:
+    """Mock OptionsFlow base class."""
+
+class FakeOptionsFlowWithReload(FakeOptionsFlow):
+    """Mock OptionsFlowWithReload deriving from OptionsFlow."""
+
+config_entries_mod = sys.modules["homeassistant.config_entries"]
+sys.modules["homeassistant"].config_entries = config_entries_mod
+config_entries_mod.OptionsFlow = FakeOptionsFlow
+config_entries_mod.OptionsFlowWithReload = FakeOptionsFlowWithReload
+
 exc_mod = sys.modules["homeassistant.exceptions"]
 exc_mod.HomeAssistantError = FakeHomeAssistantError
 exc_mod.ConfigEntryAuthFailed = FakeConfigEntryAuthFailed

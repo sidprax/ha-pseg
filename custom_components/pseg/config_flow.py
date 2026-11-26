@@ -847,7 +847,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return PsegOptionsFlowHandler()
 
 
-class PsegOptionsFlowHandler(config_entries.OptionsFlow):
+class PsegOptionsFlowHandler(config_entries.OptionsFlowWithReload):
     """Handle options flow for PSE&G Energy."""
 
     async def async_step_init(
