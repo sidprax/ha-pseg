@@ -9,7 +9,7 @@ CONF_MFA_METHOD = "mfa_method"
 CONF_MFA_CODE = "mfa_code"
 CONF_AUTH_SERVER_URL = "auth_server_url"
 CONF_ELECTRIC_RATE = "electric_rate"
-CONF_WATER_RATE = "water_rate
+CONF_WATER_RATE = "water_rate"
 CONF_AUTH_TYPE = "auth_type"
 CONF_KEEP_ALIVE = "keep_alive"
 CONF_PORTAL_URL = "portal_url"
@@ -41,13 +41,13 @@ PORTALS = {
 SERVICE_TYPE_ELECTRIC = 1  # gas is 4
 SERVICE_TYPE_WATER = 2 # water is 2 on Richland
 PORTAL_SERVICE_TYPES = {
-    PORTAL_URL_RICHLAND: SERVICE_TYPE_ELECTRIC,
-    PORTAL_URL_RICHLAND: SERVICE_TYPE_WATER,
+    PORTAL_URL_RICHLAND: (SERVICE_TYPE_ELECTRIC, SERVICE_TYPE_WATER),
 }
 
 # Richland's average residential rate (~10.0¢/kWh in 2025 + 8.5% 2026 increase)
 # You can also leave this blank in Options to use the portal's 7-day rolling average
 DEFAULT_ELECTRIC_RATE = 0.1085
+DEFAULT_WATER_RATE = 0.85
 
 MFA_METHOD_SMS = "sms"
 MFA_METHOD_EMAIL = "email"
