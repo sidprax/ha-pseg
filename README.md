@@ -1,4 +1,4 @@
-# PSE&G Energy (New Jersey) for Home Assistant
+# City of Richland, WA Energy and Water for Home Assistant
 
 [![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://github.com/hacs/default)
 [![GitHub Release](https://img.shields.io/github/v/release/sidprax/ha-pseg)](https://github.com/sidprax/ha-pseg/releases)
@@ -6,11 +6,11 @@
 [![Validate with hassfest](https://github.com/sidprax/ha-pseg/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/sidprax/ha-pseg/actions/workflows/hassfest.yaml)
 [![HACS Action](https://github.com/sidprax/ha-pseg/actions/workflows/hacs.yaml/badge.svg)](https://github.com/sidprax/ha-pseg/actions/workflows/hacs.yaml)
 
-Home Assistant integration for Public Service Electric and Gas (PSE&G) customers in New Jersey. Retrieves daily electric meter readings, costs, and historical energy trends directly from the PSE&G MySmartEnergy portal (MyMeter).
+Home Assistant integration for City of Richland, Washington. Retrieves daily electric meter readings, costs, and historical energy trends directly from the City of Richland MyMeter portal.
 
-Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / cost switching.
+Includes a built-in Lovelace card with 7-day and 14-day history views, kWh / cost, and CCF / cost switching.
 
-![PSEG Energy Card](docs/card.png)
+![City of Richland]
 
 ## Features
 
