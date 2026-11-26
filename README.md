@@ -1,4 +1,4 @@
-# PSE&G Energy (New Jersey) for Home Assistant
+# MyMeter Energy (PSE&G & Beyond) for Home Assistant
 
 [![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://github.com/hacs/default)
 [![GitHub Release](https://img.shields.io/github/v/release/sidprax/ha-pseg)](https://github.com/sidprax/ha-pseg/releases)
@@ -6,9 +6,9 @@
 [![Validate with hassfest](https://github.com/sidprax/ha-pseg/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/sidprax/ha-pseg/actions/workflows/hassfest.yaml)
 [![HACS Action](https://github.com/sidprax/ha-pseg/actions/workflows/hacs.yaml/badge.svg)](https://github.com/sidprax/ha-pseg/actions/workflows/hacs.yaml)
 
-Home Assistant integration for Public Service Electric and Gas (PSE&G) customers in New Jersey. Retrieves daily electric meter readings, costs, and historical energy trends directly from the PSE&G MySmartEnergy portal (MyMeter).
+Home Assistant integration for **MyMeter** (VertexOne) utility portals. Currently supports **PSE&G New Jersey** (Electricity, Solar Net-Metering, and Natural Gas in testing on the [`gas` branch](https://github.com/sidprax/ha-pseg/tree/gas)), with experimental **PSEG Long Island** support. We are actively looking for testers on other MyMeter-powered utilities (electric, gas, and water) to expand support across all public MyMeter instances.
 
-Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / cost switching.
+Includes a built-in Lovelace card with 7-day and 14-day history views, solar split/net return bars, kWh / cost switching, and CCF gas support.
 
 ![PSEG Energy Card](docs/card.png)
 
@@ -49,7 +49,7 @@ While this integration originated for PSE&G New Jersey, the underlying portal pl
 The long-term goal is to make both this integration and the companion add-on work with any public MyMeter instance:
 
 - **Currently Supported**:
-  - **PSE&G New Jersey**: Full support across all four authentication methods.
+  - **PSE&G New Jersey**: Full support for electricity (including net-metered solar grid export) across all four authentication methods. Natural gas (monthly CCF) is currently in testing on the [`gas` branch](https://github.com/sidprax/ha-pseg/tree/gas).
   - **PSEG Long Island (Experimental)**: Supported via manual browser cookie.
 - **Help Test Other Utilities**:
   If you use PSEG Long Island or another utility powered by MyMeter (electric, gas, or water) and are interested in helping test or expand support, please [open an issue](https://github.com/sidprax/ha-pseg/issues) or comment on [#2](https://github.com/sidprax/ha-pseg/issues/2).
@@ -79,7 +79,7 @@ This project follows a clean **two-component architecture** to keep the core Hom
 
 1. In Home Assistant, open **HACS** > **Integrations**.
 2. Click the **+ Explore & Download Repositories** button (or search bar).
-3. Search for **PSE&G Energy (New Jersey)**.
+3. Search for **MyMeter Energy (PSE&G & Beyond)** (or **PSE&G Energy**).
 4. Click **Download**, then restart Home Assistant.
 
 <details>
@@ -94,7 +94,7 @@ This project follows a clean **two-component architecture** to keep the core Hom
    https://github.com/sidprax/ha-pseg
    ```
 4. Set category to **Integration** and click **Add**.
-5. Find **PSE&G Energy (New Jersey)**, click **Download**, and restart Home Assistant.
+5. Find **MyMeter Energy (PSE&G & Beyond)**, click **Download**, and restart Home Assistant.
 </details>
 
 #### Manual Installation

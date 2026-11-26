@@ -1,6 +1,6 @@
 {
   "domain": "pseg",
-  "name": "PSE&G Energy (New Jersey)",
+  "name": "MyMeter Energy (PSE&G & Beyond)",
   "after_dependencies": ["recorder"],
   "codeowners": ["@sidprax"],
   "config_flow": true,
