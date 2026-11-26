@@ -142,12 +142,6 @@
       "invalid_auth_server_url": "The companion auth server URL must use http on loopback/private networks or https for remote hosts."
     }
   },
-  "issues": {
-    "reauth_required": {
-      "title": "PSE&G Authentication Required",
-      "description": "Your PSE&G session has expired. Please re-authenticate your account under Settings > Devices & Services > PSE&G > Reconfigure."
-    }
-  },
   "services": {
     "backfill_history": {
       "name": "Backfill Energy History",

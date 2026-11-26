@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import tests.conftest  # noqa: F401  (stubs Home Assistant for direct unittest invocation)
 
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.pseg.const import (
@@ -26,12 +26,14 @@ from custom_components.pseg.const import (
     CONF_PASSWORD,
     CONF_USERNAME,
     DEFAULT_PORTAL_URL,
+    DOMAIN,
     KEEPALIVE_MAX_SECONDS,
     KEEPALIVE_MIN_SECONDS,
     KEEPALIVE_RETRY_SECONDS,
 )
 from custom_components.pseg.coordinator import (
     PsegDataUpdateCoordinator,
+    ReauthStatus,
     keep_alive_enabled,
     next_keep_alive_delay,
 )
@@ -321,6 +323,110 @@ class TestCoordinatorKeepAlive(unittest.IsolatedAsyncioTestCase):
         coordinator._raise_auth_issues.assert_not_called()
         await coordinator.async_keep_alive()
         coordinator.client.keep_alive.assert_called_once()
+
+
+class TestAuthIssues(unittest.TestCase):
+    """Authentication notifications and cleanup of the old repair."""
+
+    def coordinator(self, entry_data):
+        entry = MagicMock(entry_id="entry123", options={})
+        return PsegDataUpdateCoordinator(MagicMock(), MagicMock(), entry_data, entry)
+
+    def test_no_custom_repair_and_old_repair_is_dismissed(self):
+        coordinator = self.coordinator({CONF_AUTH_TYPE: AUTH_TYPE_COOKIE})
+        with (
+            patch("custom_components.pseg.coordinator.ir.async_create_issue") as create,
+            patch("custom_components.pseg.coordinator.ir.async_delete_issue") as delete,
+        ):
+            coordinator._raise_auth_issues("expired")
+            create.assert_not_called()
+            coordinator._dismiss_auth_issues()
+            delete.assert_called_once_with(coordinator.hass, DOMAIN, "reauth_required_entry123")
+
+    def test_notification_links_to_reauth_for_each_mode(self):
+        cases = [
+            ({CONF_AUTH_TYPE: AUTH_TYPE_COOKIE}, False),
+            ({CONF_AUTH_TYPE: AUTH_TYPE_MYMETER, CONF_USERNAME: "user"}, True),
+            ({CONF_AUTH_TYPE: AUTH_TYPE_MYMETER, CONF_USERNAME: "user"}, False),
+        ]
+        with patch("custom_components.pseg.coordinator.persistent_notification.async_create") as create:
+            for entry_data, offline in cases:
+                with self.subTest(entry_data=entry_data, offline=offline):
+                    self.coordinator(entry_data)._raise_auth_issues("expired", addon_offline=offline)
+                    message = create.call_args.kwargs["message"]
+                    self.assertIn(
+                        "[Settings > Devices & Services > PSE&G](/config/integrations/integration/pseg)",
+                        message,
+                    )
+                    self.assertIn("click **Reconfigure**", message)
+
+    def test_notification_two_factor_depends_on_known_auth_type(self):
+        cases = [(AUTH_TYPE_MYMETER, False), (AUTH_TYPE_OKTA, True), (None, False), ("unknown", False)]
+        with patch("custom_components.pseg.coordinator.persistent_notification.async_create") as create:
+            for auth_type, expected in cases:
+                with self.subTest(auth_type=auth_type):
+                    data = {CONF_USERNAME: "user"}
+                    if auth_type is not None:
+                        data[CONF_AUTH_TYPE] = auth_type
+                    self.coordinator(data)._raise_auth_issues("expired")
+                    self.assertEqual("two-factor" in create.call_args.kwargs["message"], expected)
+
+
+class TestBackfillReauth(unittest.IsolatedAsyncioTestCase):
+    async def test_recaptcha_block_does_not_start_reauth(self):
+        hass = MagicMock()
+
+        async def run_in_executor(func, *args):
+            return func(*args)
+
+        hass.async_add_executor_job = run_in_executor
+        client = MagicMock()
+        client.fetch_history_range.side_effect = PsegAuthError("expired")
+        entry = MagicMock(entry_id="entry123", options={})
+        coordinator = PsegDataUpdateCoordinator(
+            hass, client, {CONF_AUTH_TYPE: AUTH_TYPE_MYMETER, CONF_USERNAME: "user"}, entry
+        )
+        coordinator._raise_auth_issues = MagicMock()
+        coordinator.async_reauthenticate = AsyncMock(return_value=ReauthStatus("recaptcha_blocked"))
+
+        with self.assertRaisesRegex(HomeAssistantError, "temporarily blocked by Google reCAPTCHA"):
+            await coordinator.async_backfill_history()
+        coordinator._raise_auth_issues.assert_not_called()
+        entry.async_start_reauth.assert_not_called()
+
+    async def test_auth_failure_starts_reauth_but_cooldown_does_not(self):
+        hass = MagicMock()
+
+        async def run_in_executor(func, *args):
+            return func(*args)
+
+        hass.async_add_executor_job = run_in_executor
+        client = MagicMock()
+        client.fetch_history_range.side_effect = PsegAuthError("expired")
+        entry = MagicMock(entry_id="entry123", options={})
+        coordinator = PsegDataUpdateCoordinator(
+            hass, client, {CONF_AUTH_TYPE: AUTH_TYPE_MYMETER, CONF_USERNAME: "user"}, entry
+        )
+        coordinator._raise_auth_issues = MagicMock()
+        coordinator.async_reauthenticate = AsyncMock(return_value=ReauthStatus("failed"))
+        with self.assertRaises(HomeAssistantError):
+            await coordinator.async_backfill_history()
+        coordinator._raise_auth_issues.assert_called_once()
+        entry.async_start_reauth.assert_called_once_with(hass)
+
+        entry.async_start_reauth.reset_mock()
+        coordinator._raise_auth_issues.reset_mock()
+        coordinator.async_reauthenticate.return_value = ReauthStatus("skipped_cooldown")
+        with self.assertRaisesRegex(HomeAssistantError, "cooldown"):
+            await coordinator.async_backfill_history()
+        entry.async_start_reauth.assert_not_called()
+        coordinator._raise_auth_issues.assert_not_called()
+
+        coordinator.config_entry = None
+        coordinator.async_reauthenticate.return_value = ReauthStatus("failed")
+        with self.assertRaises(HomeAssistantError):
+            await coordinator.async_backfill_history()
+        entry.async_start_reauth.assert_not_called()
 
 
 if __name__ == "__main__":
