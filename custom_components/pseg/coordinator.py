@@ -405,6 +405,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                     await self.async_record_statistics(records, is_backfill=False)
                 except Exception as stat_err:
                     _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+            return_records = data.get("return_hourly_records")
+            if return_records:
+                try:
+                    await self.async_record_return_statistics(return_records, is_backfill=False)
+                except Exception as stat_err:
+                    _LOGGER.warning("Could not record return statistics into LTS: %s", stat_err)
             self.next_update_time = dt_util.utcnow() + self.update_interval
             data["next_update"] = self.next_update_time.isoformat()
             self._last_valid_data = data
@@ -438,6 +444,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                         await self.async_record_statistics(records, is_backfill=False)
                     except Exception as stat_err:
                         _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+                return_records = data.get("return_hourly_records")
+                if return_records:
+                    try:
+                        await self.async_record_return_statistics(return_records, is_backfill=False)
+                    except Exception as stat_err:
+                        _LOGGER.warning("Could not record return statistics into LTS: %s", stat_err)
                 self.next_update_time = dt_util.utcnow() + self.update_interval
                 data["next_update"] = self.next_update_time.isoformat()
                 self._last_valid_data = data
@@ -484,6 +496,120 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         except Exception as err:
             self.status = "error"
             raise UpdateFailed(f"Error communicating with PSE&G: {err}") from err
+
+    def _normalize_stat_records(
+        self,
+        records: list[dict[str, Any]],
+        tz: Any,
+    ) -> list[dict[str, Any]]:
+        """Normalize raw usage records to sorted UTC start datetimes and floats."""
+        normalized_records = []
+        for r in records:
+            start_dt = None
+            if "start" in r and r["start"]:
+                if isinstance(r["start"], datetime):
+                    start_dt = dt_util.as_utc(r["start"])
+                elif isinstance(r["start"], (int, float)):
+                    start_dt = datetime.fromtimestamp(r["start"], tz=dt_util.UTC)
+            elif "date" in r and r["date"]:
+                local_dt = datetime.strptime(r["date"], "%Y-%m-%d").replace(tzinfo=tz)
+                start_dt = dt_util.as_utc(local_dt)
+
+            if not start_dt:
+                continue
+
+            kwh = float(r.get("kwh") or 0.0)
+            cost = float(r.get("cost") or 0.0)
+            normalized_records.append({"start": start_dt, "kwh": kwh, "cost": cost})
+
+        return sorted(normalized_records, key=lambda x: x["start"])
+
+    async def async_record_return_statistics(
+        self,
+        records: list[dict[str, Any]],
+        is_backfill: bool = False,
+    ) -> int:
+        """Import grid-return (solar export) energy statistics into LTS."""
+        if not records:
+            return 0
+
+        tz = dt_util.get_time_zone(self.hass.config.time_zone)
+        sorted_records = self._normalize_stat_records(records, tz)
+        if not sorted_records:
+            return 0
+
+        return_id = f"{DOMAIN}:electricity_return"
+        return_meta: StatisticMetaData = {
+            "has_mean": False,
+            "has_sum": True,
+            "mean_type": 0,
+            "unit_class": "energy",
+            "name": "PSE&G Electricity Returned",
+            "source": DOMAIN,
+            "statistic_id": return_id,
+            "unit_of_measurement": "kWh",
+        }
+
+        if is_backfill:
+            return await self._async_record_backfill_series(
+                sorted_records,
+                tz,
+                [(return_id, "kwh", return_meta)],
+            )
+
+        last_stat_start_dt: Optional[datetime] = None
+        last_return_sum = 0.0
+        try:
+            last_stats = await get_instance(self.hass).async_add_executor_job(
+                get_last_statistics,
+                self.hass,
+                1,
+                return_id,
+                True,
+                {"sum", "start"},
+            )
+            if return_id in last_stats and last_stats[return_id]:
+                last_stat = last_stats[return_id][0]
+                stat_start = last_stat.get("start")
+                if isinstance(stat_start, (int, float)):
+                    last_stat_start_dt = datetime.fromtimestamp(stat_start, tz=dt_util.UTC)
+                elif isinstance(stat_start, datetime):
+                    last_stat_start_dt = dt_util.as_utc(stat_start)
+                last_return_sum = float(last_stat.get("sum") or 0.0)
+        except Exception as err:
+            _LOGGER.debug("Could not query last return statistic: %s", err)
+
+        return_stats: list[StatisticData] = []
+        if last_stat_start_dt is None:
+            first_start = sorted_records[0]["start"]
+            step = timedelta(hours=1)
+            if len(sorted_records) > 1 and (sorted_records[1]["start"] - sorted_records[0]["start"]) >= timedelta(days=1):
+                step = timedelta(days=1)
+            return_stats.append(StatisticData(start=first_start - step, state=0.0, sum=0.0))
+            running_return = 0.0
+            records_to_process = sorted_records
+        else:
+            records_to_process = [r for r in sorted_records if r["start"] > last_stat_start_dt]
+            running_return = last_return_sum
+
+        if not records_to_process and len(return_stats) <= 1:
+            return 0
+
+        for r in records_to_process:
+            running_return += r["kwh"]
+            return_stats.append(
+                StatisticData(start=r["start"], state=r["kwh"], sum=round(running_return, 4))
+            )
+
+        async_add_external_statistics(self.hass, return_meta, return_stats)
+        _LOGGER.info(
+            "Added %d return statistics into LTS for %s (%s to %s)",
+            len(return_stats),
+            return_id,
+            return_stats[0]["start"].isoformat(),
+            return_stats[-1]["start"].isoformat(),
+        )
+        return len(records_to_process)
 
     async def async_record_statistics(
         self,
@@ -681,7 +807,24 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         cost_meta: StatisticMetaData,
     ) -> int:
         """Insert missing daily rows, rechain sums, and return the inserted count."""
+        return await self._async_record_backfill_series(
+            records,
+            tz,
+            [
+                (consumption_id, "kwh", consumption_meta),
+                (cost_id, "cost", cost_meta),
+            ],
+        )
+
+    async def _async_record_backfill_series(
+        self,
+        records: list[dict[str, Any]],
+        tz: Any,
+        series_specs: list[tuple[str, str, StatisticMetaData]],
+    ) -> int:
+        """Insert missing daily rows, rechain sums for one or more statistics, and return inserted count."""
         query_start = datetime.min.replace(tzinfo=dt_util.UTC)
+        stat_ids = {stat_id for stat_id, _, _ in series_specs}
 
         try:
             existing = await get_instance(self.hass).async_add_executor_job(
@@ -689,7 +832,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 self.hass,
                 query_start,
                 None,
-                {consumption_id, cost_id},
+                stat_ids,
                 "hour",
                 None,
                 {"state", "sum"},
@@ -699,7 +842,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
             existing_by_id: dict[str, list[dict[str, Any]]] = {}
             existing_days: set[date] = set()
-            for statistic_id in (consumption_id, cost_id):
+            for statistic_id in stat_ids:
                 rows = existing.get(statistic_id, [])
                 if not isinstance(rows, list):
                     raise TypeError(f"Recorder returned invalid rows for {statistic_id}")
@@ -788,10 +931,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 )
             return output
 
-        consumption_stats = rechain(consumption_id, "kwh")
-        cost_stats = rechain(cost_id, "cost")
-        async_add_external_statistics(self.hass, consumption_meta, consumption_stats)
-        async_add_external_statistics(self.hass, cost_meta, cost_stats)
+        for stat_id, key, meta in series_specs:
+            stats = rechain(stat_id, key)
+            async_add_external_statistics(self.hass, meta, stats)
         return len(records_to_insert)
 
     async def async_backfill_history(
@@ -887,6 +1029,14 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             return 0
 
         inserted_count = await self.async_record_statistics(records, is_backfill=True)
+
+        return_records = [
+            {"date": r["date"], "start": r.get("start"), "kwh": r["return_kwh"]}
+            for r in records
+            if "return_kwh" in r
+        ]
+        if return_records:
+            await self.async_record_return_statistics(return_records, is_backfill=True)
 
         # Update coordinator state if backfill includes latest readings
         latest_record = records[-1]
