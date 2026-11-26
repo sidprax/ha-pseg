@@ -581,9 +581,9 @@ class PsegClient:
 
         # Parse kWh data points and aggregate daily totals
         parsed_pts, daily_kwh_map = _parse_hourly_pts(detailed_pts)
-        parsed_return_pts, _ = _parse_hourly_pts(received_pts, abs_value=True)
+        parsed_return_pts, return_daily_map = _parse_hourly_pts(received_pts, abs_value=True)
 
-        sorted_dates = sorted(daily_kwh_map.keys())
+        all_dates = sorted(set(daily_kwh_map.keys()) | set(return_daily_map.keys())) if return_daily_map else sorted(daily_kwh_map.keys())
 
         # Hierarchy: 1) User configured override, 2) Default rate
         if self.user_configured_rate is not None and self.user_configured_rate > 0:
@@ -619,15 +619,20 @@ class PsegClient:
 
         # Build daily history (14 days)
         history_14d = []
-        for d in sorted_dates:
-            day_kwh = round(daily_kwh_map[d], 2)
+        for d in all_dates:
+            day_kwh = round(daily_kwh_map.get(d, 0.0), 2)
             day_cost = round(day_kwh * effective_rate, 2)
-            history_14d.append({
+            entry: dict[str, Any] = {
                 "date": d,
                 "kwh": day_kwh,
                 "cost": day_cost,
                 "is_exact_cost": False,
-            })
+            }
+            if return_daily_map:
+                day_ret = round(return_daily_map.get(d, 0.0), 2)
+                entry["return_kwh"] = day_ret
+                entry["return_cost"] = round(day_ret * effective_rate, 2)
+            history_14d.append(entry)
 
         latest_record = history_14d[-1] if history_14d else {"date": "None", "kwh": 0.0, "cost": 0.0, "is_exact_cost": False}
         prev_record = history_14d[-2] if len(history_14d) > 1 else {"date": "None", "kwh": 0.0, "cost": 0.0, "is_exact_cost": False}

@@ -68,6 +68,8 @@ class TestSolarReturnParsing(unittest.TestCase):
         self.assertEqual([r["kwh"] for r in parsed["hourly_records"]], [1.25, 0.0])
         self.assertEqual([r["kwh"] for r in parsed["return_hourly_records"]], [0.0, 2.5])
         self.assertEqual([r["cost"] for r in parsed["return_hourly_records"]], [0.0, 0.5])
+        self.assertEqual(parsed["history_14d"][0]["return_kwh"], 2.5)
+        self.assertEqual(parsed["history_14d"][0]["return_cost"], 0.5)
 
     def test_fetch_history_range_records_return_kwh(self):
         client = PsegClient(cookie="MM_SID=abc", user_configured_rate=0.2)

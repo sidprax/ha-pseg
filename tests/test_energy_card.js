@@ -169,3 +169,47 @@ test("a configured connection_status_entity overrides the lookup", () => {
 
   assert.match(card.shadowRoot.innerHTML, new RegExp(EXPIRED));
 });
+
+test("solar accounts with return_kwh render split return bars and net metrics", () => {
+  const { Card } = browser();
+  const date = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const html = render(Card, "sensor.pseg_electricity_consumption", {
+    states: {
+      "sensor.pseg_electricity_consumption": {
+        state: "10",
+        attributes: {
+          meter: "Meter #1234",
+          latest_date: date,
+          latest_cost: 2.5,
+          history_14d: [{ date, kwh: 10, cost: 2.5, return_kwh: 4, return_cost: 1.0 }],
+        },
+      },
+    },
+  });
+
+  assert.match(html, /bar-track-split/);
+  assert.match(html, /bar-fill-down/);
+  assert.match(html, /6\.00/);
+});
+
+test("gas consumption entity renders CCF billing-period mode without return", () => {
+  const { Card } = browser();
+  const html = render(Card, "sensor.pseg_gas_consumption", {
+    states: {
+      "sensor.pseg_gas_consumption": {
+        state: "42",
+        attributes: {
+          device_class: "gas",
+          unit_of_measurement: "CCF",
+          meter: "Gas #9999",
+          period_start: "2026-10-01",
+          period_end: "2026-10-31",
+        },
+      },
+    },
+  });
+
+  assert.match(html, /Usage \(CCF\)/);
+  assert.match(html, /42\.00/);
+  assert.doesNotMatch(html, /class="bar-track bar-track-split"/);
+});

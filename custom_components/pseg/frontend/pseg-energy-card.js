@@ -204,6 +204,31 @@ class PsegEnergyCard extends HTMLElement {
         localStorage.removeItem(SHARED_CACHE_KEY);
       } catch (_) {}
 
+      const isGas = Boolean(
+        entity &&
+        (entity.attributes?.device_class === "gas" ||
+          entity.attributes?.unit_of_measurement === "CCF" ||
+          (this.config.entity || "").includes("gas"))
+      );
+
+      // Build gas history fallback if only single billing period attributes are present
+      if (isGas && entity && entity.attributes && (!Array.isArray(entity.attributes.history_14d) || entity.attributes.history_14d.length === 0)) {
+        const gasHist = Array.isArray(entity.attributes.history) ? entity.attributes.history : [];
+        if (gasHist.length > 0) {
+          entity = { ...entity, attributes: { ...entity.attributes, history_14d: gasHist } };
+        } else if (entity.state !== "unavailable" && entity.state !== "unknown" && !isNaN(parseFloat(entity.state))) {
+          const pDate = entity.attributes.period_start || entity.attributes.period_end || new Date().toISOString().slice(0, 10);
+          entity = {
+            ...entity,
+            attributes: {
+              ...entity.attributes,
+              latest_date: entity.attributes.period_end || pDate,
+              history_14d: [{ date: String(pDate), kwh: parseFloat(entity.state) || 0, cost: null }],
+            },
+          };
+        }
+      }
+
       // 1. Cache valid entity attributes if present
       if (entity && entity.attributes && Array.isArray(entity.attributes.history_14d) && entity.attributes.history_14d.length > 0) {
         this._cachedEntity = {
@@ -305,52 +330,76 @@ class PsegEnergyCard extends HTMLElement {
     const meterNumMatch = meterRaw.match(/\d+/);
     const fullMeterNum = meterNumMatch ? meterNumMatch[0] : "";
     const meterLast4 = fullMeterNum.length >= 4 ? fullMeterNum.slice(-4) : fullMeterNum;
-    const meterText = meterLast4 ? `Meter ...${meterLast4}` : "Electric";
+    const meterText = meterLast4 ? `Meter ...${meterLast4}` : (isGas ? "Gas" : "Electric");
 
     // Reconstruct calendar sequence to avoid missing dates (e.g. 10/10)
     const historyMap = new Map();
     rawHistory.forEach(item => {
-      if (item && item.date) {
-        historyMap.set(item.date, {
-          kwh: parseFloat(item.kwh) || 0,
+      if (item && (item.date || item.start)) {
+        const dKey = item.date || String(item.start);
+        historyMap.set(dKey, {
+          kwh: parseFloat(item.kwh ?? item.ccf) || 0,
+          returnKwh: item.return_kwh != null ? (parseFloat(item.return_kwh) || 0) : 0,
           cost: item.cost != null ? parseFloat(item.cost) : null,
+          returnCost: item.return_cost != null ? (parseFloat(item.return_cost) || 0) : 0,
           isExactCost: !!item.is_exact_cost
         });
       }
     });
 
-    // Reference end date: yesterday (since meter readings are delayed by 1 day)
-    const now = new Date();
-    const yesterday = new Date(now.getTime() - 86400000);
-    const yesterdayIso = yesterday.toISOString().slice(0, 10);
-
-    let endDate = yesterdayIso;
-    if (latestRawDate && latestRawDate > endDate) {
-      endDate = latestRawDate;
-    }
-    if (!endDate && rawHistory.length > 0) {
-      endDate = rawHistory[rawHistory.length - 1].date;
-    }
-    if (!endDate) {
-      endDate = new Date().toISOString().slice(0, 10);
-    }
-
-    const endDt = new Date(endDate + "T12:00:00Z");
     const activeData = [];
-    for (let i = daysToShow - 1; i >= 0; i--) {
-      const cur = new Date(endDt.getTime() - i * 86400000);
-      const iso = cur.toISOString().slice(0, 10);
-      const itemData = historyMap.get(iso);
-      const val = itemData ? itemData.kwh : null;
-      const costVal = itemData ? itemData.cost : null;
-      const isExactCost = itemData ? itemData.isExactCost : false;
-      activeData.push({
-        date: iso,
-        kwh: val,
-        cost: costVal,
-        isExactCost: isExactCost,
-        isMissing: val === null
+    if (isGas) {
+      rawHistory.slice(-12).forEach(item => {
+        const dKey = item.date || String(item.start || "");
+        const itemData = historyMap.get(dKey);
+        const val = itemData ? itemData.kwh : 0;
+        activeData.push({
+          date: dKey,
+          kwh: val,
+          returnKwh: 0,
+          cost: itemData ? itemData.cost : null,
+          returnCost: 0,
+          isExactCost: false,
+          isMissing: false
+        });
       });
+    } else {
+      // Reference end date: yesterday (since meter readings are delayed by 1 day)
+      const now = new Date();
+      const yesterday = new Date(now.getTime() - 86400000);
+      const yesterdayIso = yesterday.toISOString().slice(0, 10);
+
+      let endDate = yesterdayIso;
+      if (latestRawDate && latestRawDate > endDate) {
+        endDate = latestRawDate;
+      }
+      if (!endDate && rawHistory.length > 0) {
+        endDate = rawHistory[rawHistory.length - 1].date;
+      }
+      if (!endDate) {
+        endDate = new Date().toISOString().slice(0, 10);
+      }
+
+      const endDt = new Date(endDate + "T12:00:00Z");
+      for (let i = daysToShow - 1; i >= 0; i--) {
+        const cur = new Date(endDt.getTime() - i * 86400000);
+        const iso = cur.toISOString().slice(0, 10);
+        const itemData = historyMap.get(iso);
+        const val = itemData ? itemData.kwh : null;
+        const retVal = itemData ? itemData.returnKwh : 0;
+        const costVal = itemData ? itemData.cost : null;
+        const retCostVal = itemData ? itemData.returnCost : 0;
+        const isExactCost = itemData ? itemData.isExactCost : false;
+        activeData.push({
+          date: iso,
+          kwh: val,
+          returnKwh: retVal,
+          cost: costVal,
+          returnCost: retCostVal,
+          isExactCost: isExactCost,
+          isMissing: val === null
+        });
+      }
     }
 
     // Format As of MM/DD header date
@@ -382,24 +431,30 @@ class PsegEnergyCard extends HTMLElement {
       } catch (e) {}
     }
 
+    // Detect solar return mode
+    const hasReturn = !isGas && activeData.some(d => (d.returnKwh || 0) > 0);
+    const solarView = this.config.solar_view || "split";
+    const useNetMetrics = hasReturn && solarView !== "gross";
+
     // Calculate Average over valid points
     const validPoints = activeData.filter(d => !d.isMissing);
     const count = validPoints.length || 1;
-    const avgKwh = validPoints.reduce((acc, c) => acc + (c.kwh || 0), 0) / count;
+    const netOf = (p) => useNetMetrics ? ((p.kwh || 0) - (p.returnKwh || 0)) : (p.kwh || 0);
+    const avgKwh = validPoints.reduce((acc, c) => acc + netOf(c), 0) / count;
 
     // Latest day data
-    const lastValidPoint = validPoints[validPoints.length - 1] || { kwh: parseFloat(entity.state) || 0 };
-    const latestKwh = parseFloat(lastValidPoint.kwh) || 0;
+    const lastValidPoint = validPoints[validPoints.length - 1] || { kwh: parseFloat(entity.state) || 0, returnKwh: 0 };
+    const latestKwh = netOf(lastValidPoint);
 
     // Latest vs Average Diff %
-    const diffPct = avgKwh > 0 ? ((latestKwh - avgKwh) / avgKwh) * 100 : 0;
+    const diffPct = Math.abs(avgKwh) > 0 ? ((latestKwh - avgKwh) / Math.abs(avgKwh)) * 100 : 0;
     const isHigher = diffPct > 0;
     const absDiff = Math.abs(diffPct).toFixed(0);
     const arrowSymbol = isHigher ? "↑" : "↓";
     const pillClass = isHigher ? "pill-amber" : "pill-green";
 
     // Cycle Projection & comparison vs last cycle
-    const projKwh = avgKwh * cycleDays;
+    const projKwh = isGas ? avgKwh : (avgKwh * cycleDays);
     let projDiffBadge = "";
     if (hasLastCycle && lastCycleKwh > 0) {
       const projDiffPct = ((projKwh - lastCycleKwh) / lastCycleKwh) * 100;
@@ -415,31 +470,68 @@ class PsegEnergyCard extends HTMLElement {
     }
 
     // Single-unit string representations for header mini stats
-    const latestCost = parseFloat(entity.attributes.latest_cost) || (latestKwh * rate);
-    const latestDisplay = isDollars ? latestCost.toFixed(2) : latestKwh.toFixed(2);
-    const avgCost = validPoints.reduce((acc, c) => acc + ((c.cost != null && c.cost > 0) ? c.cost : (c.kwh * rate)), 0) / count;
-    const avgDisplay = isDollars ? avgCost.toFixed(2) : avgKwh.toFixed(2);
-    const projDisplay = isDollars
+    const rawLatestCost = parseFloat(entity.attributes.latest_cost) || ((lastValidPoint.kwh || 0) * rate);
+    const latestRetCost = lastValidPoint.returnCost || ((lastValidPoint.returnKwh || 0) * rate);
+    const latestCost = useNetMetrics ? (rawLatestCost - latestRetCost) : rawLatestCost;
+    const latestDisplay = (isDollars && !isGas) ? latestCost.toFixed(2) : latestKwh.toFixed(2);
+    const avgCost = validPoints.reduce((acc, c) => {
+      const cCost = (c.cost != null && c.cost > 0) ? c.cost : ((c.kwh || 0) * rate);
+      const rCost = c.returnCost || ((c.returnKwh || 0) * rate);
+      return acc + (useNetMetrics ? (cCost - rCost) : cCost);
+    }, 0) / count;
+    const avgDisplay = (isDollars && !isGas) ? avgCost.toFixed(2) : avgKwh.toFixed(2);
+    const projDisplay = (isDollars && !isGas)
       ? `${Math.round(projKwh * rate)}`
       : `${Math.round(projKwh)}`;
-    const unitLabel = isDollars ? "$" : "kWh";
+    const unitLabel = isGas ? "CCF" : (isDollars ? "$" : "kWh");
+    const avgLabel = isGas ? "Avg (Period)" : `Avg (${daysToShow}d)`;
+    const projLabel = isGas ? "Avg (Bill)" : "Proj (Cycle)";
     const rateDisplay = rate.toFixed(2);
 
-    // Build bars with reduced gap and wider fill
-    const maxKwh = Math.max(...validPoints.map(d => d.kwh || 0), 6);
+    // Build bars
+    const maxPos = Math.max(...validPoints.map(d => (hasReturn && solarView === "net") ? Math.max(0, (d.kwh || 0) - (d.returnKwh || 0)) : (d.kwh || 0)), isGas ? 1 : 6);
+    const maxNeg = hasReturn ? Math.max(...validPoints.map(d => solarView === "net" ? Math.max(0, (d.returnKwh || 0) - (d.kwh || 0)) : (d.returnKwh || 0)), 1) : 0;
+    const maxSplit = Math.max(maxPos, maxNeg);
+
     const barsHtml = activeData.map((item, idx) => {
       const kwh = item.kwh !== null ? item.kwh : 0;
-      const heightPct = item.isMissing ? 4 : Math.min(Math.max((kwh / maxKwh) * 100, 16), 100);
+      const retKwh = item.returnKwh || 0;
       const isLatest = idx === activeData.length - 1 && !item.isMissing;
-      const barValText = item.isMissing ? "-" : this.formatBarVal(item, isDollars, rate);
-      const barBg = item.isMissing ? "rgba(255, 255, 255, 0.12)" : this.getBarColor(kwh, avgKwh);
-
-      // Compact date (M/D)
       const dParts = item.date.split("-");
-      const dateText = dParts.length === 3 ? `${parseInt(dParts[1])}/${parseInt(dParts[2])}` : item.date;
+      const dateText = isGas
+        ? (dParts.length === 3 ? `${parseInt(dParts[1])}/${dParts[0].slice(-2)}` : item.date)
+        : (dParts.length === 3 ? `${parseInt(dParts[1])}/${parseInt(dParts[2])}` : item.date);
+
+      if (hasReturn && solarView === "split") {
+        const upPct = item.isMissing ? 0 : (kwh > 0 ? Math.min(Math.max((kwh / maxSplit) * 50, 8), 50) : 0);
+        const downPct = item.isMissing ? 0 : (retKwh > 0 ? Math.min(Math.max((retKwh / maxSplit) * 50, 8), 50) : 0);
+        const netKwh = kwh - retKwh;
+        const barTitle = item.isMissing
+          ? `${item.date}: No Data`
+          : `${item.date}: In ${kwh.toFixed(2)} kWh • Out ${retKwh.toFixed(2)} kWh • Net ${netKwh.toFixed(2)} kWh`;
+        return `
+          <div class="bar-col ${isLatest ? 'is-latest' : ''} ${item.isMissing ? 'is-missing' : ''}" title="${escapeHtml(barTitle)}">
+            <div class="bar-track bar-track-split">
+              <div class="split-zero"></div>
+              ${upPct > 0 ? `<div class="bar-fill bar-fill-up" style="height: ${upPct}%; background: ${this.getBarColor(kwh, avgKwh)};"></div>` : ""}
+              ${downPct > 0 ? `<div class="bar-fill bar-fill-down" style="height: ${downPct}%;"></div>` : ""}
+            </div>
+            <span class="bar-date">${escapeHtml(dateText)}</span>
+          </div>
+        `;
+      }
+
+      const displayMetric = (hasReturn && solarView === "net") ? (kwh - retKwh) : kwh;
+      const heightPct = item.isMissing ? 4 : Math.min(Math.max((Math.abs(displayMetric) / maxPos) * 100, 16), 100);
+      const barValText = item.isMissing ? "-" : (isGas ? (displayMetric < 10 ? displayMetric.toFixed(1) : `${Math.round(displayMetric)}`) : this.formatBarVal({ ...item, kwh: displayMetric }, isDollars, rate));
+      const barBg = item.isMissing
+        ? "rgba(255, 255, 255, 0.12)"
+        : (displayMetric < 0 ? "linear-gradient(180deg, rgba(6, 182, 212, 0.85) 0%, rgba(14, 116, 144, 0.65) 100%)" : this.getBarColor(displayMetric, avgKwh));
       const fitsInside = heightPct >= 32;
       const dayCostText = (item.cost != null && item.cost > 0) ? `$${item.cost.toFixed(2)}` : `$${(kwh * rate).toFixed(2)}`;
-      const barTitle = item.isMissing ? `${item.date}: No Data` : `${item.date}: ${kwh} kWh • ${dayCostText}`;
+      const barTitle = item.isMissing
+        ? `${item.date}: No Data`
+        : (isGas ? `${item.date}: ${kwh} CCF` : `${item.date}: ${kwh} kWh • ${dayCostText}`);
 
       return `
         <div class="bar-col ${isLatest ? 'is-latest' : ''} ${item.isMissing ? 'is-missing' : ''}" title="${escapeHtml(barTitle)}">
@@ -628,6 +720,32 @@ class PsegEnergyCard extends HTMLElement {
         .bar-col.is-missing .bar-fill {
           border: 1px dashed rgba(255, 255, 255, 0.20);
         }
+        .bar-track-split {
+          position: relative;
+        }
+        .split-zero {
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: 50%;
+          height: 1px;
+          background: rgba(255, 255, 255, 0.22);
+        }
+        .bar-fill-up {
+          position: absolute;
+          bottom: 50%;
+          left: 0;
+          right: 0;
+          border-radius: 5px 5px 0 0;
+        }
+        .bar-fill-down {
+          position: absolute;
+          top: 50%;
+          left: 0;
+          right: 0;
+          border-radius: 0 0 5px 5px;
+          background: linear-gradient(180deg, rgba(6, 182, 212, 0.85) 0%, rgba(14, 116, 144, 0.65) 100%);
+        }
 
         .val-inside {
           font-size: 8.5px;
@@ -715,7 +833,7 @@ class PsegEnergyCard extends HTMLElement {
 
             <!-- Avg -->
             <div class="stat-item">
-              <span class="stat-label">Avg (${daysToShow}d)</span>
+              <span class="stat-label">${escapeHtml(avgLabel)}</span>
               <div class="stat-val-row">
                 <span class="stat-val">${avgDisplay}</span>
               </div>
@@ -723,20 +841,20 @@ class PsegEnergyCard extends HTMLElement {
 
             <!-- Projection (Cycle) -->
             <div class="stat-item">
-              <span class="stat-label">Proj (Cycle)</span>
+              <span class="stat-label">${escapeHtml(projLabel)}</span>
               <div class="stat-val-row">
                 <span class="stat-val">${projDisplay}</span>
                 ${projDiffBadge}
               </div>
             </div>
 
-            <!-- Rate -->
+            ${!isGas ? `<!-- Rate -->
             <div class="stat-item" title="${escapeHtml(rateTooltip)}">
               <span class="stat-label">Rate</span>
               <div class="stat-val-row">
                 <span class="stat-val">${rateDisplay}</span>
               </div>
-            </div>
+            </div>` : ""}
           </div>
         </div>
 
