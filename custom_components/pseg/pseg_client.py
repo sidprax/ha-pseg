@@ -84,12 +84,25 @@ class PsegConnectionError(Exception):
     """Exception raised for network or communication failures with PSE&G."""
 
 
-def select_meter_series(series_list: list[dict[str, Any]]) -> dict[str, Any]:
-    """Select the meter series containing valid usage readings.
+def _series_values(series: dict[str, Any]) -> list[float]:
+    """Return all non-None numeric readings from a chart series."""
+    readings = series.get("data") or []
+    values: list[float] = []
+    for point in readings:
+        if isinstance(point, dict):
+            val = point_value(point)
+            if val is not None:
+                values.append(val)
+    return values
 
-    Accounts with more than one meter expose one "Meter #..." series per meter,
-    and only the meter that has data contains readings. Fall back to the old
-    name match for portals that call the series "PSE&G Electric Meter" or "Meter".
+
+def select_meter_series_pair(series_list: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Select the (delivered, received) meter series pair from chart data.
+
+    Net-metered solar accounts expose two series with the same "Meter #..." name:
+    one with non-negative delivered values and one with non-positive received (grid
+    export) values. Non-solar accounts expose a single series per meter, returning
+    ({}, ) for received.
     """
     meters = [
         series
@@ -98,21 +111,37 @@ def select_meter_series(series_list: list[dict[str, Any]]) -> dict[str, Any]:
         and str(series.get("name") or "").startswith("Meter #")
     ]
 
+    grouped: dict[str, list[tuple[dict[str, Any], list[float]]]] = {}
     for meter in meters:
-        readings = meter.get("data") or []
-        if any(
-            isinstance(point, dict) and point_value(point) is not None
-            for point in readings
-        ):
-            _LOGGER.info("Selected PSE&G meter: %s", meter.get("name"))
-            return meter
+        vals = _series_values(meter)
+        if vals:
+            name = str(meter.get("name") or "")
+            grouped.setdefault(name, []).append((meter, vals))
+
+    for name, entries in grouped.items():
+        delivered = next(
+            (m for m, vals in entries if all(v >= 0 for v in vals)),
+            entries[0][0],
+        )
+        received = next(
+            (m for m, vals in entries if m is not delivered and all(v <= 0 for v in vals) and any(v < 0 for v in vals)),
+            {},
+        )
+        _LOGGER.info("Selected PSE&G meter: %s (has_return=%s)", name, bool(received))
+        return delivered, received
 
     for series in series_list:
         if isinstance(series, dict) and "Meter" in str(series.get("name") or ""):
-            return series
+            return series, {}
 
     _LOGGER.warning("No PSE&G meter series contains valid usage readings")
-    return {}
+    return {}, {}
+
+
+def select_meter_series(series_list: list[dict[str, Any]]) -> dict[str, Any]:
+    """Select the meter series containing valid usage readings."""
+    delivered, _ = select_meter_series_pair(series_list)
+    return delivered
 
 
 class PsegClient:
@@ -370,7 +399,7 @@ class PsegClient:
                 _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
             else:
                 series_list = chart_data.get("series", [])
-                meter_series = select_meter_series(series_list)
+                meter_series, received_series = select_meter_series_pair(series_list)
 
                 pts = meter_series.get("data", [])
                 for pt in pts:
@@ -397,6 +426,36 @@ class PsegClient:
                             "kwh": kwh,
                             "cost": cost_val,
                         }
+
+                for pt in received_series.get("data", []):
+                    if isinstance(pt, dict):
+                        value = point_value(pt)
+                        if value is None:
+                            continue
+                        return_kwh = abs(round(value, 4))
+                        return_cost = round(return_kwh * self.effective_rate, 4)
+                        hs = pt.get("hs", {})
+                        p_start = hs.get("start", "")
+                        try:
+                            dt = datetime.strptime(p_start, "%m/%d/%Y")
+                            date_iso = dt.strftime("%Y-%m-%d")
+                        except Exception:
+                            date_iso = p_start
+
+                        x = pt.get("x", 0)
+                        start_utc = portal_time_to_utc(x) if x else None
+                        if date_iso in records_map:
+                            records_map[date_iso]["return_kwh"] = return_kwh
+                            records_map[date_iso]["return_cost"] = return_cost
+                        else:
+                            records_map[date_iso] = {
+                                "date": date_iso,
+                                "start": start_utc,
+                                "kwh": 0.0,
+                                "cost": 0.0,
+                                "return_kwh": return_kwh,
+                                "return_cost": return_cost,
+                            }
 
             curr_start = curr_end + timedelta(days=1)
             if curr_start <= end_dt:
@@ -478,7 +537,7 @@ class PsegClient:
             raise PsegConnectionError("No series data returned from MyMeter. Unexpected portal response.")
 
         nav_series = series_list[0].get("data", [])
-        meter_series = select_meter_series(series_list)
+        meter_series, received_series = select_meter_series_pair(series_list)
         temp_series = {}
 
         for s in series_list:
@@ -487,38 +546,42 @@ class PsegClient:
 
         meter_name = meter_series.get("name") or "PSE&G Electric Meter"
         detailed_pts = meter_series.get("data", [])
+        received_pts = received_series.get("data", [])
         temp_pts = temp_series.get("data", [])
 
+        def _parse_hourly_pts(pts: list[Any], *, abs_value: bool = False) -> tuple[list[dict[str, Any]], dict[str, float]]:
+            daily_map: dict[str, float] = {}
+            parsed: list[dict[str, Any]] = []
+            prev_x = None
+            for pt in pts:
+                if isinstance(pt, dict):
+                    x = pt.get("x", 0)
+                    start_utc = portal_time_to_utc(x, fold=1 if x == prev_x else 0)
+                    prev_x = x
+                    value = point_value(pt)
+                    if value is None:
+                        continue
+                    kwh = abs(round(value, 4)) if abs_value else round(value, 4)
+
+                    hs = pt.get("hs", {})
+                    start_str = hs.get("start", "")
+                    try:
+                        date_iso = datetime.strptime(start_str, "%m/%d/%Y").strftime("%Y-%m-%d")
+                    except Exception:
+                        date_iso = start_utc.astimezone(PORTAL_TIMEZONE).strftime("%Y-%m-%d")
+
+                    daily_map[date_iso] = round(daily_map.get(date_iso, 0.0) + kwh, 4)
+                    parsed.append({
+                        "start": start_utc,
+                        "date": date_iso,
+                        "kwh": kwh,
+                        "x": x,
+                    })
+            return parsed, daily_map
+
         # Parse kWh data points and aggregate daily totals
-        daily_kwh_map: dict[str, float] = {}
-        parsed_pts = []
-        prev_x = None
-        for pt in detailed_pts:
-            if isinstance(pt, dict):
-                x = pt.get("x", 0)
-                # A repeated timestamp is the second 1 AM hour of the night
-                # the clocks go back.
-                start_utc = portal_time_to_utc(x, fold=1 if x == prev_x else 0)
-                prev_x = x
-                value = point_value(pt)
-                if value is None:
-                    continue
-                kwh = round(value, 4)
-
-                hs = pt.get("hs", {})
-                start_str = hs.get("start", "")
-                try:
-                    date_iso = datetime.strptime(start_str, "%m/%d/%Y").strftime("%Y-%m-%d")
-                except Exception:
-                    date_iso = start_utc.astimezone(PORTAL_TIMEZONE).strftime("%Y-%m-%d")
-
-                daily_kwh_map[date_iso] = round(daily_kwh_map.get(date_iso, 0.0) + kwh, 4)
-                parsed_pts.append({
-                    "start": start_utc,
-                    "date": date_iso,
-                    "kwh": kwh,
-                    "x": x,
-                })
+        parsed_pts, daily_kwh_map = _parse_hourly_pts(detailed_pts)
+        parsed_return_pts, _ = _parse_hourly_pts(received_pts, abs_value=True)
 
         sorted_dates = sorted(daily_kwh_map.keys())
 
@@ -573,6 +636,16 @@ class PsegClient:
         temp_range = latest_temp.get("tr", "")
         temp_value = point_value(latest_temp)
 
+        return_hourly_records = [
+            {
+                "start": p["start"],
+                "date": p["date"],
+                "kwh": p["kwh"],
+                "cost": round(p["kwh"] * effective_rate, 4),
+            }
+            for p in parsed_return_pts
+        ]
+
         return {
             "meter": meter_name,
             "last_updated": datetime.now(timezone.utc).isoformat(),
@@ -585,6 +658,7 @@ class PsegClient:
             "previous_cost": prev_record["cost"],
             "history_14d": history_14d,
             "hourly_records": hourly_records,
+            "return_hourly_records": return_hourly_records,
             "temperature_range": temp_range,
             "temperature_avg": round(temp_value, 1) if temp_value is not None else None,
             "total_records": len(nav_series),
