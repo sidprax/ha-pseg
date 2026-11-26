@@ -1,4 +1,4 @@
-"""PSEG API Client for Home Assistant.
+"""Richland API Client for Home Assistant.
 
 Uses session cookies to communicate directly with a PSEG MySmartEnergy portal (MyMeter platform).
 """
@@ -16,8 +16,13 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import requests
-
-from .const import DEFAULT_ELECTRIC_RATE, DEFAULT_PORTAL_URL, PORTAL_SERVICE_TYPES
+from .const import (
+    DEFAULT_ELECTRIC_RATE,
+    DEFAULT_PORTAL_URL,
+    PORTAL_SERVICE_TYPES,
+    SERVICE_TYPE_ELECTRIC,
+    SERVICE_TYPE_WATER,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +32,7 @@ KEEPALIVE_PATH = "/Widget/LoadWidgets"
 # Selects the service (electric or gas) whose usage the dashboard chart shows
 SERVICE_TYPE_PATH = "/Dashboard/SetServiceType"
 # The portals' local time zone (NJ and Long Island); MyMeter timestamps are wall-clock times in it.
-PORTAL_TIMEZONE = ZoneInfo("America/New_York")
+PORTAL_TIMEZONE = ZoneInfo("America/Los_Angeles")
 
 
 def portal_time_to_utc(x_ms: float, fold: int = 0) -> datetime:
@@ -118,19 +123,36 @@ def select_meter_series(series_list: list[dict[str, Any]]) -> dict[str, Any]:
 class PsegClient:
     """Client for PSE&G MySmartEnergy."""
 
-    def __init__(
+def __init__(
         self,
-        cookie: str,
+        cookie: str = "",
         user_configured_rate: Optional[float] = None,
         portal_url: str = DEFAULT_PORTAL_URL,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        user_configured_water_rate: Optional[float] = None,
     ) -> None:
         self.base_url = portal_url.rstrip("/")
-        self.service_type = PORTAL_SERVICE_TYPES.get(self.base_url)
+        self.username = username
+        self.password = password
         self.cookie = cookie
         try:
-            self.user_configured_rate = float(user_configured_rate) if user_configured_rate and float(user_configured_rate) > 0 else None
+            self.user_configured_rate = (
+                float(user_configured_rate)
+                if user_configured_rate and float(user_configured_rate) > 0
+                else None
+            )
         except (ValueError, TypeError):
             self.user_configured_rate = None
+
+        try:
+            self.user_configured_water_rate = (
+                float(user_configured_water_rate)
+                if user_configured_water_rate and float(user_configured_water_rate) > 0
+                else None
+            )
+        except (ValueError, TypeError):
+            self.user_configured_water_rate = None
 
         self.effective_rate = self.user_configured_rate or DEFAULT_ELECTRIC_RATE
         self.rate_source = "user_configured" if self.user_configured_rate else "default"
@@ -146,7 +168,8 @@ class PsegClient:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Referer": f"{self.base_url}/Dashboard",
         })
-        self.update_cookie(cookie)
+        if cookie:
+            self.update_cookie(cookie)
 
     def update_cookie(self, new_cookie: str) -> None:
         """Update active session cookies.
@@ -188,6 +211,79 @@ class PsegClient:
         if cookie and cookie != self.cookie:
             _LOGGER.debug("MyMeter renewed the session cookie")
             self.cookie = cookie
+
+def login(self, timeout: float = 25) -> bool:
+        """Authenticate directly against Richland's MyMeter portal (no MFA/reCAPTCHA)."""
+        if not self.username or not self.password:
+            raise PsegAuthError("Username and password are required for native login")
+
+        # Step 1: Fetch login page and CSRF token
+        try:
+            resp = self.session.get(f"{self.base_url}/", timeout=timeout)
+            resp.raise_for_status()
+        except requests.RequestException as err:
+            raise PsegConnectionError(f"Failed to load login page: {err}") from err
+
+        token_match = re.search(
+            r'name=[\"\']__RequestVerificationToken[\"\'][^>]*value=[\"\']([^\"\']+)[\"\']',
+            resp.text,
+        )
+        if not token_match:
+            raise PsegAuthError("Could not find __RequestVerificationToken on login page")
+
+        # Step 2: Submit credentials
+        login_headers = {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": self.base_url,
+            "Referer": f"{self.base_url}/",
+        }
+        login_payload = {
+            "RedirectUrl": "",
+            "LoginErrorMessage": "",
+            "LoginEmail": self.username,
+            "LoginPassword": self.password,
+            "ExternalLogin": "False",
+            "TwoFactorRendered": "False",
+            "SecretQuestionRendered": "False",
+            "__RequestVerificationToken": token_match.group(1),
+        }
+
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/Home/Login",
+                data=login_payload,
+                headers=login_headers,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            res_json = resp.json()
+        except (requests.RequestException, ValueError) as err:
+            raise PsegConnectionError(f"Login request failed: {err}") from err
+
+        # Verify redirect to LoginActions (invalid credentials return an HTML error fragment instead)
+        ajax_results = res_json.get("AjaxResults") or []
+        redirect_url = next(
+            (ar.get("Value") for ar in ajax_results if isinstance(ar, dict) and ar.get("Action") == "Redirect"),
+            None,
+        )
+        if not redirect_url:
+            raise PsegAuthError("Invalid Richland MyAccount credentials")
+
+        # Step 3: Complete post-login session initialization
+        try:
+            self.session.get(redirect_url, timeout=timeout)
+            self.session.get(
+                f"{self.base_url}/Integration/LoginActionsComplete",
+                params={"_": int(time.time() * 1000)},
+                headers={"X-Requested-With": "XMLHttpRequest", "Referer": redirect_url},
+                timeout=timeout,
+            )
+        except requests.RequestException as err:
+            raise PsegConnectionError(f"Post-login initialization failed: {err}") from err
+
+        self._remember_renewed_cookies()
+        return True
 
     def test_connection(self, timeout: float = 20) -> bool:
         """Validate whether current session cookie is authorized."""
@@ -411,10 +507,21 @@ class PsegClient:
         )
         return sorted_records
 
-    def fetch_energy_data(self, days_back: int = 14) -> Dict[str, Any]:
-        """Fetch usage and temperature data using the 3-step MyMeter chart sequence."""
-        self._select_service_type()
-        token = self._get_verification_token()
+    def fetch_service_data(
+        self,
+        service_type: int,
+        days_back: int = 14,
+        rate_override: Optional[float] = None,
+        ) -> Dict[str, Any]:
+        """Fetch usage data for a specific service, auto-reauthenticating once on expiry."""
+        try:
+            return self._fetch_service_data_once(electric_rate, days_back, rate_override)
+        except PsegAuthError:
+            if not (self.username and self.password):
+                raise
+            _LOGGER.debug("Session expired; re-authenticating with Richland MyAccount")
+            self.login()
+            return self._fetch_service_data_once(water_rate, days_back, rate_override)
 
         end_dt = datetime.now()
         start_dt = end_dt - timedelta(days=days_back)
@@ -444,6 +551,50 @@ class PsegClient:
             "Origin": self.base_url,
         }
 
+    def fetch_all_data(self, days_back: int = 14) -> Dict[str, Any]:
+        """Fetch both Electric (kWh) and Water (CCF) data in one update cycle."""
+        return {
+            "electric": self.fetch_service_data(SERVICE_TYPE_ELECTRIC, days_back, self.user_configured_rate),
+            "water": self.fetch_service_data(SERVICE_TYPE_WATER, days_back, self.user_configured_water_rate),
+        }
+        """Fetch usage data for a specific service, auto-reauthenticating once on expiry."""
+        try:
+            return self._fetch_service_data_once(electric_rate, days_back, rate_override)
+        except PsegAuthError:
+            if not (self.username and self.password):
+                raise
+            _LOGGER.debug("Session expired; re-authenticating with Richland MyAccount")
+            self.login()
+            return self._fetch_service_data_once(water_rate, days_back, rate_override)
+
+        end_dt = datetime.now()
+        start_dt = end_dt - timedelta(days=days_back)
+        start_str = start_dt.strftime("%Y-%m-%d")
+        end_str = end_dt.strftime("%Y-%m-%d")
+
+        chart_setup_data_kwh = {
+            "__RequestVerificationToken": token,
+            "UsageInterval": "5",  # 5 = Hourly
+            "UsageType": "1",  # 1 = Consumption (kWh)
+            "jsTargetName": "StorageType",
+            "EnableHoverChart": "true",
+            "Start": start_str,
+            "End": end_str,
+            "IsRangeOpen": "False",
+            "MaintainMaxDate": "true",
+            "SelectedViaDateRange": "False",
+            "ChartComparison": "1",
+            "ChartComparison2": "0",
+            "ChartComparison3": "0",
+            "ChartComparison4": "0",
+        }
+
+        headers2 = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": self.base_url,
+        }
+        
         # Step 2: Query kWh consumption data
         try:
             resp2 = self.session.post(f"{self.base_url}/Dashboard/Chart", data=chart_setup_data_kwh, headers=headers2, timeout=25)
